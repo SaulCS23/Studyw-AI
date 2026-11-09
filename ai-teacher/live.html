@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Talking Teacher Live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=Kalam:wght@400;700&display=swap">
+<style>
+/* Layout: the whiteboard fills the room, subtitles under it, one big call button along the bottom. */
+:root{
+  --bg:#eef1ec; --surface:#ffffff; --ink:#1d2a26; --muted:#5d6b66; --line:#d3dad5;
+  --accent:#2f6b57; --accent-ink:#ffffff; --pencil:#e8b23a; --danger:#b4462f;
+  --board:#fbfcfa; --board-ink:#1f3b8a; --board-frame:#b9c2bd; --caption-bg:#18211e; --caption-ink:#f4f7f5;
+  --display:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;
+  --body:"Atkinson Hyperlegible","Segoe UI",system-ui,sans-serif;
+  --hand:"Kalam","Comic Sans MS","Segoe Print",cursive;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#111715; --surface:#1a2320; --ink:#e6ede9; --muted:#9aaba4; --line:#2c3833;
+  --accent:#6fbf9f; --accent-ink:#0d1512; --pencil:#f0c35a; --danger:#e07a63;
+  --board:#1e2b27; --board-ink:#eef3ea; --board-frame:#3a4a44; --caption-bg:#000000; --caption-ink:#f4f7f5; color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);font-size:16px;line-height:1.5}
+.app{height:100%;display:grid;grid-template-rows:auto 1fr auto auto;gap:12px;padding:12px 16px 14px;max-width:1200px;margin:0 auto}
+.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.top h1{font-family:var(--display);font-size:1.45rem;margin:0;font-weight:700}
+.status{color:var(--muted);flex:1;min-width:0}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:.85rem;padding:3px 10px;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+[data-mode="listening"] .dot{background:var(--danger)}
+[data-mode="connecting"] .dot{background:var(--pencil)}
+[data-mode="speaking"] .dot{background:var(--accent)}
+button{font:inherit}
+.btn{font-weight:700;border-radius:10px;padding:8px 14px;cursor:pointer;border:1px solid var(--accent);background:transparent;color:var(--accent)}
+.btn.solid{background:var(--accent);color:var(--accent-ink)}
+:focus-visible{outline:3px solid var(--pencil);outline-offset:2px}
+.board{background:var(--board);color:var(--board-ink);border:10px solid var(--board-frame);border-radius:6px;min-height:0;overflow:auto;padding:22px 28px;font-family:var(--hand);font-size:1.45rem;line-height:1.35}
+.board h2{font-size:2rem;margin:0 0 .3em;font-weight:700;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:6px}
+.board h3{font-size:1.5rem;margin:.6em 0 .2em}
+.board p{margin:.3em 0}
+.board ul,.board ol{margin:.3em 0 .3em 1.2em;padding:0}
+.board svg{display:block;max-width:100%;height:auto;max-height:52vh;margin:.4em auto;color:var(--board-ink)}
+.board svg text{font-family:var(--hand);fill:currentColor}
+.board .hl{color:var(--danger)}
+.board table{border-collapse:collapse;margin:.4em 0}.board td,.board th{border:2px solid currentColor;padding:2px 10px}
+.board.fresh{animation:wipe .45s ease-out}
+@keyframes wipe{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+@media (prefers-reduced-motion:reduce){.board.fresh{animation:none}}
+.caption{background:var(--caption-bg);color:var(--caption-ink);border-radius:10px;padding:12px 18px;min-height:3.6em;font-size:1.3rem;line-height:1.4;text-align:center;text-wrap:balance}
+.caption.you{font-style:italic;opacity:.85}
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.call{border:none;border-radius:999px;padding:14px 26px;font-weight:700;font-size:1.05rem;cursor:pointer;background:var(--accent);color:var(--accent-ink);display:inline-flex;gap:10px;align-items:center}
+.call.live{background:var(--danger)}
+.call svg{width:22px;height:22px}
+.controls form{display:flex;gap:8px;flex:1;min-width:240px}
+input,select,textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 11px;min-width:0}
+.controls input{flex:1}
+dialog{border:none;border-radius:14px;padding:0;max-width:720px;width:calc(100% - 32px);background:var(--surface);color:var(--ink)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.dlg{padding:20px 22px;display:flex;flex-direction:column;gap:14px;max-height:88vh;overflow:auto}
+.dlg h2{font-family:var(--display);margin:0;font-size:1.3rem}
+.dlg ol{margin:0;padding-left:1.3em;display:flex;flex-direction:column;gap:10px}
+label{display:flex;flex-direction:column;gap:4px;font-size:.78rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+label input{text-transform:none;letter-spacing:0;font-size:1rem}
+.copybox{position:relative}
+.copybox textarea{width:100%;min-height:120px;font-size:.88rem;resize:vertical}
+.copybox .btn{position:absolute;top:6px;right:6px;padding:4px 10px;font-size:.85rem;background:var(--surface)}
+code{background:var(--bg);padding:1px 6px;border-radius:5px}
+.small{font-size:.88rem;color:var(--muted);margin:0}
+</style>
+</head>
+<body>
+<div class="app" id="app" data-mode="idle">
+  <div class="top">
+    <h1>Talking Teacher Live</h1>
+    <span class="pill"><span class="dot"></span><span id="modeWord">Not started</span></span>
+    <span class="status" id="status"></span>
+    <button class="btn" id="openSetup" type="button">Setup</button>
+  </div>
+
+  <div class="board" id="board">
+    <h2>Welcome to class</h2>
+    <p>Press <b>Start lesson</b> and just talk, like a phone call.</p>
+    <p>I'll draw on this board while I explain.</p>
+    <p class="hl">Interrupt me whenever you want. I'll stop and listen.</p>
+  </div>
+
+  <div class="caption" id="caption">Subtitles will appear here.</div>
+
+  <div class="controls">
+    <button class="call" id="call" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      <span id="callWord">Start lesson</span>
+    </button>
+    <form id="typeForm">
+      <input id="typed" placeholder="You can also type during the lesson" autocomplete="off">
+      <button class="btn solid" type="button" id="sendBtn">Send</button>
+    </form>
+  </div>
+</div>
+
+<dialog id="setup">
+  <form method="dialog" class="dlg">
+    <h2>Setup (one time)</h2>
+    <ol>
+      <li>Sign up for free at <a href="https://elevenlabs.io/app/agents" target="_blank" rel="noopener">elevenlabs.io</a>, open <b>Agents</b> and create a new agent (if it only offers templates, pick a simple one like <b>Voice Reading Companion</b> and replace its text). Name it "Talking Teacher".</li>
+      <li>In <b>First message</b>, paste:
+        <div class="copybox"><textarea readonly id="firstMsg">Hi! I'm Ms. Rivera, your teacher. What would you like to learn about today?</textarea><button class="btn" type="button" data-copy="firstMsg">Copy</button></div>
+      </li>
+      <li>In <b>System prompt</b>, paste:
+        <div class="copybox"><textarea readonly id="sysPrompt">You are Ms. Rivera, a warm, lively teacher in a relaxed one-on-one voice lesson. Talk like a real person: short natural sentences, contractions, a little humor, and react to what the student says ("oh, good question!"). Keep each turn short, about two to four sentences, then hand the conversation back, often with a small question to check they understood. If the student is wrong, encourage them and give a hint instead of the answer. If the student interrupts, stop and respond to what they said.
+
+The student can see a whiteboard next to you. Whatever you explain gets sketched on it automatically: a title, key words, formulas, steps or a simple drawing. You can refer to it naturally ("take a look at the board"), but describe things in words too.</textarea><button class="btn" type="button" data-copy="sysPrompt">Copy</button></div>
+      </li>
+      <li>Under <b>LLM</b>, choose a <b>Claude</b> model (the newest Claude Sonnet is a good balance of smart and fast). Under <b>Voice</b>, pick any voice you like the sound of.</li>
+      <li>Click <b>Save</b> / <b>Publish</b>. You can press <b>Test AI agent</b> on that page to hear the voice right away.</li>
+      <li>Copy the <b>Agent ID</b> (it starts with <code>agent_</code>, shown near the agent's name or under the Widget tab) and paste it here:
+        <label for="agentId" style="margin-top:6px">Agent ID<input id="agentId" placeholder="agent_..." autocomplete="off"></label>
+      </li>
+      <li>For the whiteboard, paste your <b>Anthropic API key</b> here. The app uses it to sketch what the teacher is explaining. It stays on this laptop only.
+        <label for="anthropicKey" style="margin-top:6px">Anthropic API key<input id="anthropicKey" type="password" placeholder="sk-ant-..." autocomplete="off"></label>
+      </li>
+    </ol>
+    <p class="small">The free plan includes about 15 minutes of talking per month. That's enough to try it out. Use headphones or speakers, either works; this one handles echo for you.</p>
+    <div style="display:flex;justify-content:flex-end"><button class="btn solid" type="button" id="saveSetup">Save</button></div>
+  </form>
+</dialog>
+
+<script type="module">
+import { Conversation } from "https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.30.0/+esm";
+/* Files opened from the computer don't remember the mic permission, so the browser asks on every request.
+   Ask once, keep that microphone open, and hand out copies of it. */
+const md = navigator.mediaDevices, realGUM = md.getUserMedia.bind(md);
+let micStream = null, micAsk = null;
+md.getUserMedia = async (constraints) => {
+  if (!constraints || !constraints.audio || constraints.video) return realGUM(constraints);
+  if (!micStream || micStream.getAudioTracks().every(t => t.readyState === "ended")){
+    micAsk = micAsk || realGUM({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      .then(s => (micStream = s)).finally(() => { micAsk = null; });
+    await micAsk;
+  }
+  return micStream.clone();
+};
+const $ = id => document.getElementById(id);
+const app = $("app"), boardEl = $("board"), captionEl = $("caption"), statusEl = $("status");
+let convo = null;
+
+try { $("agentId").value = localStorage.getItem("ttl-agent") || ""; $("anthropicKey").value = localStorage.getItem("ttl-akey") || ""; } catch(e){}
+$("setup").addEventListener("close", () => { try { localStorage.setItem("ttl-agent", $("agentId").value.trim()); localStorage.setItem("ttl-akey", $("anthropicKey").value.trim()); } catch(e){} });
+$("openSetup").onclick = () => $("setup").showModal();
+$("saveSetup").onclick = () => { $("setup").close(); statusEl.textContent = $("agentId").value.trim() ? "Saved. Press Start lesson." : "Add your Agent ID in Setup to start."; };
+document.querySelectorAll("[data-copy]").forEach(b => b.onclick = async () => {
+  const t = $(b.dataset.copy); try { await navigator.clipboard.writeText(t.value); b.textContent = "Copied"; } catch(e){ t.select(); }
+  setTimeout(() => b.textContent = "Copy", 1500);
+});
+if (!$("agentId").value) $("setup").showModal();
+
+function setMode(m){
+  app.dataset.mode = m;
+  $("modeWord").textContent = {idle:"Not started", connecting:"Connecting", listening:"Listening", speaking:"Talking"}[m] || m;
+}
+
+/* Whiteboard */
+const ALLOWED = new Set("h2 h3 p ul ol li b strong i em u br span div table tr td th thead tbody sub sup svg g path line polyline polygon rect circle ellipse text tspan defs marker".split(" "));
+function sanitize(html){
+  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, "text/html");
+  doc.querySelectorAll("script,style,iframe,object,embed").forEach(el => el.remove());
+  const walk = node => {
+    [...node.children].forEach(el => {
+      if (!ALLOWED.has(el.tagName.toLowerCase())){ el.replaceWith(...el.childNodes); return walk(node); }
+      [...el.attributes].forEach(a => { const n = a.name.toLowerCase();
+        if (n.startsWith("on") || n === "href" || n === "xlink:href" || n === "src" || /javascript:/i.test(a.value)) el.removeAttribute(a.name); });
+      walk(el);
+    });
+  };
+  walk(doc.body.firstChild);
+  return doc.body.firstChild.innerHTML;
+}
+function showBoard(html){
+  boardEl.classList.remove("fresh"); void boardEl.offsetWidth;
+  boardEl.innerHTML = sanitize(html); boardEl.classList.add("fresh"); boardEl.scrollTop = 0;
+}
+
+/* Auto whiteboard: after each teacher turn, Claude sketches what was just explained. */
+const transcript = []; let toolUsedThisTurn = false, boardTimer = null, boardReq = 0, lastAgentText = "";
+function noteMessage(role, text){
+  const last = transcript[transcript.length - 1];
+  if (last && last.role === role){ if (role === "teacher" && text.startsWith(last.text.slice(0, 20))) last.text = text; else last.text += " " + text; }
+  else transcript.push({ role, text });
+  if (transcript.length > 12) transcript.shift();
+}
+function scheduleBoard(){
+  clearTimeout(boardTimer);
+  boardTimer = setTimeout(drawBoard, 400);
+}
+async function drawBoard(){
+  const key = $("anthropicKey").value.trim();
+  if (!key || toolUsedThisTurn) return;
+  const my = ++boardReq;
+  const convoText = transcript.map(m => (m.role === "teacher" ? "Teacher: " : "Student: ") + m.text).join("\n");
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true", "anthropic-beta": "server-side-fallback-2026-07-01" },
+      body: JSON.stringify({
+        model: "claude-opus-5-5", max_tokens: 4000, output_config: { effort: "low" }, fallbacks: "default",
+        system: `You draw the whiteboard for a live voice lesson. Given the conversation, decide what the board should show right now to support the teacher's latest turn.
+Reply with ONLY the board content as simple HTML: an <h2> title, <p>, <ul><li>, <b>, <span class="hl"> for a highlight, <table>, and inline <svg> drawings. For SVG use viewBox="0 0 600 340", stroke="currentColor", fill="none" for shapes, and <text> with font-size between 18 and 28. Keep it short and simple, like a teacher's quick sketch: a title plus a drawing, a formula, a few key words or numbered steps.
+If the latest turn is small talk or nothing new is being explained, reply with exactly KEEP.`,
+        messages: [{ role: "user", content: "Conversation so far:\n" + convoText }]
+      })
+    });
+    if (!res.ok){ if (res.status === 401) statusEl.textContent = "Whiteboard: the Anthropic key didn't work. Check it in Setup."; return; }
+    const data = await res.json();
+    if (my !== boardReq || data.stop_reason === "refusal") return;
+    const html = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").replace(/^\s*```(?:html)?|```\s*$/g, "").trim();
+    if (html && html !== "KEEP") showBoard(html);
+  } catch(e){ /* the lesson keeps going without the board */ }
+}
+
+/* Lesson */
+async function start(){
+  const agentId = $("agentId").value.trim();
+  if (!agentId){ $("setup").showModal(); return; }
+  setMode("connecting"); statusEl.textContent = "";
+  try {
+    convo = await Conversation.startSession({
+      agentId,
+      clientTools: {
+        show_on_board: async ({ content }) => { if (content){ toolUsedThisTurn = true; showBoard(content); } return "The board now shows it."; }
+      },
+      onConnect: () => { $("call").classList.add("live"); $("callWord").textContent = "End lesson"; setMode("listening"); },
+      onDisconnect: () => { convo = null; $("call").classList.remove("live"); $("callWord").textContent = "Start lesson"; setMode("idle"); },
+      onModeChange: ({ mode }) => setMode(mode === "speaking" ? "speaking" : "listening"),
+      onMessage: (m) => {
+        const text = m?.message ?? ""; if (!text) return;
+        const fromYou = m.source === "user" || m.role === "user";
+        captionEl.classList.toggle("you", fromYou);
+        captionEl.textContent = fromYou ? "You: " + text : text;
+        if (fromYou){ toolUsedThisTurn = false; noteMessage("student", text); }
+        else { noteMessage("teacher", text); scheduleBoard(); }
+      },
+      onError: (e) => { statusEl.textContent = "Problem: " + (e?.message || e); }
+    });
+  } catch(e){
+    setMode("idle");
+    statusEl.textContent = /permission|notallowed/i.test(String(e?.name || e?.message || e))
+      ? "Allow the microphone (click the icon in the address bar) and try again."
+      : "Couldn't start: " + (e?.message || e) + ". Check the Agent ID in Setup.";
+  }
+}
+$("call").onclick = async () => { if (convo){ await convo.endSession(); } else start(); };
+$("typed").addEventListener("input", () => { if (convo) convo.sendUserActivity(); });
+function sendTyped(){ const q = $("typed").value.trim(); if (!q) return;
+  if (!convo){ statusEl.textContent = "Press Start lesson first."; return; }
+  convo.sendUserMessage(q); $("typed").value = ""; toolUsedThisTurn = false; noteMessage("student", q);
+  captionEl.classList.add("you"); captionEl.textContent = "You: " + q;
+}
+$("sendBtn").onclick = sendTyped;
+$("typed").addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); sendTyped(); } });
+$("typeForm").addEventListener("submit", e => e.preventDefault());
+</script>
+</body>
+</html>

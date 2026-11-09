@@ -41,13 +41,13 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 
 ## Tech stack
 <!-- TODO: fill in once decided -->
-- Frontend: plain HTML, CSS and JavaScript in one file (`ai-teacher/index.html`), with no framework and no build step. The student website stack is _TBD_.
+- Frontend: plain HTML, CSS and JavaScript, one self-contained file per AI teacher version, with no framework and no build step. `live.html` loads `@elevenlabs/client` from the jsDelivr CDN. The student website stack is _TBD_.
 - Backend: _TBD_. None yet; the AI teacher calls the APIs straight from the browser.
 - Database: _TBD_
 - Auth (secure logins + roles): _TBD_
-- AI teacher brain (LLM): Claude via the Anthropic Messages API, streamed. You pick Opus 5.5, Sonnet 5.5 or Haiku 5.5 in Settings.
-- Voice: ElevenLabs (`eleven_flash_v2_5` model) or the browser's built-in Web Speech API voices (free; "Natural"/"Online" voices in Edge sound best).
-- Speech-to-text (for interruptions): the browser's Web Speech API (`SpeechRecognition`), so Chrome/Edge only.
+- AI teacher brain (LLM): Claude. In `index.html` it's called via the Anthropic Messages API, streamed, and you pick Opus 5.5, Sonnet 5.5 or Haiku 5.5 in Settings. In `live.html` it's the Claude model chosen in the ElevenLabs agent, and a separate Claude Opus 5.5 call draws the whiteboard.
+- Voice: `live.html` uses an ElevenLabs Agent (conversational AI over a live connection, which handles interruptions and echo). `index.html` uses ElevenLabs text-to-speech (`eleven_flash_v2_5`) or the browser's built-in Web Speech API voices (free; "Natural"/"Online" voices in Edge sound best).
+- Speech-to-text (for interruptions): the ElevenLabs Agent in `live.html`; the browser's Web Speech API (`SpeechRecognition`, Chrome/Edge only) in `index.html`.
 - Video for human teachers: Jitsi Meet
 - Hosting: _TBD_
 
@@ -56,12 +56,14 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 ## Project structure
 ```
 /              → root config, this file, README, .gitignore, .env.example
-/ai-teacher/   → the talking AI teacher (index.html, a single self-contained page)
+/ai-teacher/   → the talking AI teacher, one self-contained page per version
+  index.html   → laptop version (Claude + browser or ElevenLabs text-to-speech)
+  live.html    → ElevenLabs Live version (ElevenLabs voice agent + Claude whiteboard)
 ```
 
 ## Commands
 - Install: nothing to install yet.
-- Run locally: open `ai-teacher/index.html` in Chrome or Edge, then add your API keys in Settings.
+- Run locally: open `ai-teacher/index.html` or `ai-teacher/live.html` in Chrome or Edge, then add your keys in Settings / Setup.
 - Test: no automated tests yet.
 - Lint / format: no linter set up yet.
 
