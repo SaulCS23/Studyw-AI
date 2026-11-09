@@ -41,28 +41,29 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 
 ## Tech stack
 <!-- TODO: fill in once decided -->
-- Frontend:
-- Backend:
-- Database:
-- Auth (secure logins + roles):
-- AI teacher brain (LLM):
-- Voice: ElevenLabs (new version), plus the existing laptop voice setup: _which?_
-- Speech-to-text (for interruptions):
+- Frontend: plain HTML, CSS and JavaScript in one file (`ai-teacher/index.html`), with no framework and no build step. The student website stack is _TBD_.
+- Backend: _TBD_. None yet; the AI teacher calls the APIs straight from the browser.
+- Database: _TBD_
+- Auth (secure logins + roles): _TBD_
+- AI teacher brain (LLM): Claude via the Anthropic Messages API, streamed. You pick Opus 5.5, Sonnet 5.5 or Haiku 5.5 in Settings.
+- Voice: ElevenLabs (`eleven_flash_v2_5` model) or the browser's built-in Web Speech API voices (free; "Natural"/"Online" voices in Edge sound best).
+- Speech-to-text (for interruptions): the browser's Web Speech API (`SpeechRecognition`), so Chrome/Edge only.
 - Video for human teachers: Jitsi Meet
-- Hosting:
+- Hosting: _TBD_
+
+> ⚠️ For now, API keys are typed into the AI teacher's Settings and saved in the browser's localStorage. That's fine for testing on a laptop but **not for the public site**: keys must move to a server that reads them from `.env`.
 
 ## Project structure
-<!-- TODO: update as folders are created -->
 ```
-/            → root config, this file, README
+/              → root config, this file, README, .gitignore, .env.example
+/ai-teacher/   → the talking AI teacher (index.html, a single self-contained page)
 ```
 
 ## Commands
-<!-- TODO: fill in once the project is scaffolded -->
-- Install: ``
-- Run locally: ``
-- Test: ``
-- Lint / format: ``
+- Install: nothing to install yet.
+- Run locally: open `ai-teacher/index.html` in Chrome or Edge, then add your API keys in Settings.
+- Test: no automated tests yet.
+- Lint / format: no linter set up yet.
 
 ## How we work (rules for humans AND Claude)
 - **Never commit directly to `main`.** Create a branch: `yourname/short-description` (e.g. `saul/login-page`).
