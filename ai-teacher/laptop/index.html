@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Talking Teacher</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=Kalam:wght@400;700&display=swap">
+<style>
+/* Layout: the whiteboard fills the room, subtitles sit under it like a caption bar, controls along the bottom. */
+:root{
+  --bg:#eef1ec; --surface:#ffffff; --ink:#1d2a26; --muted:#5d6b66; --line:#d3dad5;
+  --accent:#2f6b57; --accent-ink:#ffffff; --pencil:#e8b23a; --danger:#b4462f;
+  --board:#fbfcfa; --board-ink:#1f3b8a; --board-frame:#b9c2bd; --caption-bg:#18211e; --caption-ink:#f4f7f5;
+  --display:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;
+  --body:"Atkinson Hyperlegible","Segoe UI",system-ui,sans-serif;
+  --hand:"Kalam","Comic Sans MS","Segoe Print",cursive;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#111715; --surface:#1a2320; --ink:#e6ede9; --muted:#9aaba4; --line:#2c3833;
+  --accent:#6fbf9f; --accent-ink:#0d1512; --pencil:#f0c35a; --danger:#e07a63;
+  --board:#1e2b27; --board-ink:#eef3ea; --board-frame:#3a4a44; --caption-bg:#000000; --caption-ink:#f4f7f5; color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);font-size:16px;line-height:1.5}
+.app{height:100%;display:grid;grid-template-rows:auto 1fr auto auto;gap:12px;padding:12px max(16px,env(safe-area-inset-left)) 14px;max-width:1200px;margin:0 auto}
+.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.top h1{font-family:var(--display);font-size:1.45rem;margin:0;font-weight:700}
+.status{color:var(--muted);flex:1;min-width:0}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:.85rem;padding:3px 10px;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+[data-state="listening"] .dot{background:var(--danger)}
+[data-state="thinking"] .dot{background:var(--pencil)}
+[data-state="speaking"] .dot{background:var(--accent)}
+button{font:inherit}
+.btn{font-weight:700;border-radius:10px;padding:8px 14px;cursor:pointer;border:1px solid var(--accent);background:transparent;color:var(--accent)}
+.btn.solid{background:var(--accent);color:var(--accent-ink)}
+.btn:disabled{opacity:.4;cursor:default}
+:focus-visible{outline:3px solid var(--pencil);outline-offset:2px}
+
+.board{position:relative;background:var(--board);color:var(--board-ink);border:10px solid var(--board-frame);border-radius:6px;
+  min-height:0;overflow:auto;padding:22px 28px;font-family:var(--hand);font-size:1.45rem;line-height:1.35;box-shadow:inset 0 0 40px rgba(0,0,0,.04)}
+.board h2{font-size:2rem;margin:0 0 .3em;font-weight:700;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:6px}
+.board h3{font-size:1.5rem;margin:.6em 0 .2em}
+.board p{margin:.3em 0}
+.board ul,.board ol{margin:.3em 0 .3em 1.2em;padding:0}
+.board svg{display:block;max-width:100%;height:auto;max-height:52vh;margin:.4em auto;color:var(--board-ink)}
+.board svg text{font-family:var(--hand);fill:currentColor}
+.board .hl{color:var(--danger)}
+.board table{border-collapse:collapse;margin:.4em 0}.board td,.board th{border:2px solid currentColor;padding:2px 10px}
+.board.fresh{animation:wipe .45s ease-out}
+@keyframes wipe{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+@media (prefers-reduced-motion:reduce){.board.fresh{animation:none}}
+.board .empty{color:var(--muted);font-family:var(--body);font-size:1rem}
+
+.caption{background:var(--caption-bg);color:var(--caption-ink);border-radius:10px;padding:12px 18px;min-height:3.6em;font-size:1.3rem;line-height:1.4;text-align:center;text-wrap:balance}
+.caption .said{opacity:.55}
+.caption.you{font-style:italic;opacity:.85}
+
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.mic{width:64px;height:64px;border-radius:50%;border:none;background:var(--accent);color:var(--accent-ink);cursor:pointer;display:grid;place-items:center;flex:none;position:relative}
+.mic svg{width:28px;height:28px}
+.mic.on{background:var(--danger)}
+.mic.on::after{content:"";position:absolute;inset:-7px;border-radius:50%;border:3px solid var(--pencil);animation:pulse 1.4s ease-out infinite}
+@keyframes pulse{from{opacity:.9;transform:scale(.92)}to{opacity:0;transform:scale(1.2)}}
+.controls form{display:flex;gap:8px;flex:1;min-width:240px}
+input,select,textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 11px;min-width:0}
+.controls input{flex:1}
+.hint{font-size:.85rem;color:var(--muted)}
+kbd{font-family:inherit;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:0 5px;background:var(--surface)}
+
+dialog{border:none;border-radius:14px;padding:0;max-width:640px;width:calc(100% - 32px);background:var(--surface);color:var(--ink)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.dlg{padding:20px 22px;display:flex;flex-direction:column;gap:14px;max-height:85vh;overflow:auto}
+.dlg h2{font-family:var(--display);margin:0;font-size:1.3rem}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:560px){.grid{grid-template-columns:1fr}}
+label{display:flex;flex-direction:column;gap:4px;font-size:.78rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+label.inline{flex-direction:row;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:.95rem;color:var(--ink)}
+label input,label select,label textarea{text-transform:none;letter-spacing:0;font-size:1rem}
+textarea{min-height:110px;resize:vertical}
+fieldset{border:1px solid var(--line);border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:10px}
+legend{font-weight:700;padding:0 6px}
+.small{font-size:.85rem;color:var(--muted);margin:0}
+.small a{color:var(--accent)}
+.transcript{display:flex;flex-direction:column;gap:8px}
+.transcript div{padding:8px 12px;border-radius:10px;background:var(--bg);white-space:pre-wrap}
+.transcript b{display:block;font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.banner{background:var(--pencil);color:#2a2105;border-radius:10px;padding:10px 14px}
+</style>
+</head>
+<body>
+<div class="app" id="app" data-state="idle">
+  <div class="top">
+    <h1>Talking Teacher</h1>
+    <span class="pill"><span class="dot"></span><span id="stateWord">Ready</span></span>
+    <span class="status" id="status"></span>
+    <button class="btn" id="openLog" type="button">Transcript</button>
+    <button class="btn" id="openSettings" type="button">Settings</button>
+  </div>
+
+  <div class="board" id="board" aria-live="polite">
+    <h2>Welcome to class</h2>
+    <p>Tap the microphone (or press <kbd>Space</kbd>) and just start talking.</p>
+    <p>I'll explain things out loud and draw on this board while I talk.</p>
+    <p class="hl">You can interrupt me any time: just speak, or press <kbd>Space</kbd>.</p>
+  </div>
+
+  <div class="caption" id="caption">Subtitles will appear here.</div>
+
+  <div class="controls">
+    <button class="mic" id="mic" type="button" aria-label="Start or stop listening">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    </button>
+    <form id="typeForm">
+      <input id="typed" placeholder="Or type here and press Enter" autocomplete="off">
+      <button class="btn solid" type="submit">Ask</button>
+      <button class="btn" type="button" id="stop">Stop</button>
+    </form>
+    <span class="hint" id="micHint">Tip: wear headphones so the teacher doesn't hear itself.</span>
+  </div>
+</div>
+
+<dialog id="settings">
+  <form method="dialog" class="dlg" id="settingsForm">
+    <h2>Settings</h2>
+    <div class="banner" id="keyBanner" hidden>Paste your Anthropic API key below to start. It stays on this computer only.</div>
+    <fieldset>
+      <legend>Claude</legend>
+      <label for="apiKey">Anthropic API key
+        <input id="apiKey" type="password" placeholder="sk-ant-..." autocomplete="off">
+      </label>
+      <p class="small">Get one at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> (you add a few dollars of credit first). The key is saved only in this browser on this laptop.</p>
+      <label for="model">Brain
+        <select id="model">
+          <option value="claude-opus-5-5">Claude Opus 5.5 (smartest)</option>
+          <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (quicker replies)</option>
+          <option value="claude-haiku-5-5">Claude Haiku 5.5 (fastest, cheapest)</option>
+        </select>
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>The class</legend>
+      <div class="grid">
+        <label for="subject">Subject<input id="subject" value="Anything the student asks about"></label>
+        <label for="level">Student level
+          <select id="level"><option>Young child (ages 6–9)</option><option>Middle school</option><option selected>High school</option><option>Adult beginner</option></select>
+        </label>
+      </div>
+      <label for="persona">Teacher personality
+        <textarea id="persona">You are Ms. Rivera, a warm, lively teacher who loves her subject. You talk like a real person in a relaxed one-on-one lesson: natural, conversational sentences, contractions, the occasional "okay, so" or "here's the cool part". Keep each turn short, about two to five sentences, then hand the conversation back to the student, often with a small question to check they understood. If the student is wrong, encourage them and give a hint instead of the answer.</textarea>
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>Voice</legend>
+      <label for="engine">Voice engine
+        <select id="engine">
+          <option value="browser">Built-in voices (free)</option>
+          <option value="eleven">ElevenLabs (most human, needs a key)</option>
+        </select>
+      </label>
+      <div class="grid" id="browserVoice">
+        <label for="voice">Voice<select id="voice"></select></label>
+        <label for="rate">Speed
+          <select id="rate"><option value="0.9">Relaxed</option><option value="1" selected>Normal</option><option value="1.1">Brisk</option></select>
+        </label>
+      </div>
+      <p class="small" id="voiceTip">The most natural free voices are the "Natural" or "Online" ones in Microsoft Edge, and "Enhanced"/"Premium" voices on a Mac.</p>
+      <div class="grid" id="elevenVoice" hidden>
+        <label for="elevenKey">ElevenLabs API key<input id="elevenKey" type="password" autocomplete="off"></label>
+        <label for="elevenVoiceId">Voice ID<input id="elevenVoiceId" value="21m00Tcm4TlvDq8ikWAM"></label>
+      </div>
+      <button class="btn" type="button" id="testVoice">Test voice</button>
+    </fieldset>
+    <fieldset>
+      <legend>Conversation</legend>
+      <label class="inline" for="handsFree"><input type="checkbox" id="handsFree" checked> Hands-free: keep listening after the teacher answers</label>
+      <label class="inline" for="bargeIn"><input type="checkbox" id="bargeIn" checked> Let me interrupt by talking over the teacher</label>
+      <label for="lang">Language I speak
+        <select id="lang"><option value="en-US">English (US)</option><option value="en-GB">English (UK)</option><option value="es-ES">Español</option><option value="es-MX">Español (México)</option><option value="fr-FR">Français</option><option value="pt-BR">Português</option><option value="he-IL">עברית</option></select>
+      </label>
+    </fieldset>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" type="button" id="clearChat">Start a new lesson</button>
+      <button class="btn solid" value="ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="logDlg">
+  <form method="dialog" class="dlg">
+    <h2>Transcript</h2>
+    <div class="transcript" id="transcript"><p class="small">Nothing said yet.</p></div>
+    <div style="display:flex;justify-content:flex-end"><button class="btn solid">Close</button></div>
+  </form>
+</dialog>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const app = $("app"), boardEl = $("board"), captionEl = $("caption"), statusEl = $("status");
+
+/* ---------------- Settings (saved in this browser only) ---------------- */
+const FIELDS = ["apiKey","model","subject","level","persona","engine","voice","rate","elevenKey","elevenVoiceId","handsFree","bargeIn","lang"];
+function loadSettings(){
+  let s = {}; try { s = JSON.parse(localStorage.getItem("tt-settings") || "{}"); } catch(e){}
+  FIELDS.forEach(f => { if (s[f] === undefined) return; const el = $(f); if (el.type === "checkbox") el.checked = s[f]; else el.value = s[f]; });
+}
+function saveSettings(){
+  const s = {}; FIELDS.forEach(f => { const el = $(f); s[f] = el.type === "checkbox" ? el.checked : el.value; });
+  try { localStorage.setItem("tt-settings", JSON.stringify(s)); } catch(e){}
+}
+const val = f => $(f).type === "checkbox" ? $(f).checked : $(f).value;
+loadSettings();
+function syncVoiceUI(){ const e = val("engine") === "eleven"; $("elevenVoice").hidden = !e; $("browserVoice").hidden = e; $("voiceTip").hidden = e; }
+$("engine").addEventListener("change", syncVoiceUI); syncVoiceUI();
+$("openSettings").onclick = () => { $("keyBanner").hidden = !!val("apiKey"); $("settings").showModal(); };
+$("settings").addEventListener("close", () => { saveSettings(); if (rec) rec.lang = val("lang"); });
+$("clearChat").onclick = () => { stopEverything(); history.length = 0; renderTranscript(); boardEl.innerHTML = '<p class="empty">New lesson. Ask me anything.</p>'; captionEl.textContent = ""; $("settings").close(); };
+$("openLog").onclick = () => { renderTranscript(); $("logDlg").showModal(); };
+
+/* ---------------- State ---------------- */
+let state = "idle";
+function setState(s){
+  state = s; app.dataset.state = s;
+  $("stateWord").textContent = {idle:"Ready", listening:"Listening", thinking:"Thinking", speaking:"Talking"}[s];
+}
+const history = []; // {role:"user"|"assistant", content:string}
+function pushHistory(role, content){
+  const last = history[history.length - 1];
+  if (last && last.role === role) last.content += "\n" + content; else history.push({role, content});
+}
+function renderTranscript(){
+  const t = $("transcript"); t.innerHTML = "";
+  if (!history.length){ t.innerHTML = '<p class="small">Nothing said yet.</p>'; return; }
+  history.forEach(m => { const d = document.createElement("div"); const b = document.createElement("b");
+    b.textContent = m.role === "user" ? "You" : "Teacher"; d.append(b, document.createTextNode(spokenPart(m.content))); t.appendChild(d); });
+}
+
+/* ---------------- Whiteboard ---------------- */
+const ALLOWED = new Set("h2 h3 p ul ol li b strong i em u br span div table tr td th thead tbody sub sup svg g path line polyline polygon rect circle ellipse text tspan defs marker".split(" "));
+function sanitize(html){
+  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, "text/html");
+  const walk = node => {
+    [...node.children].forEach(el => {
+      if (!ALLOWED.has(el.tagName.toLowerCase())){ el.replaceWith(...el.childNodes); return walk(node); }
+      [...el.attributes].forEach(a => { const n = a.name.toLowerCase();
+        if (n.startsWith("on") || n === "href" || n === "xlink:href" || n === "src" || /javascript:/i.test(a.value)) el.removeAttribute(a.name); });
+      walk(el);
+    });
+  };
+  walk(doc.body.firstChild);
+  return doc.body.firstChild.innerHTML;
+}
+function showBoard(html){
+  boardEl.classList.remove("fresh"); void boardEl.offsetWidth;
+  boardEl.innerHTML = sanitize(html); boardEl.classList.add("fresh"); boardEl.scrollTop = 0;
+}
+// Everything outside <board>…</board> is spoken.
+function spokenPart(text){ return text.replace(/<board>[\s\S]*?<\/board>/gi, " ").replace(/<board>[\s\S]*$/i, " ").replace(/<\/?[a-z][^>]*>/gi, " ").replace(/\s+/g, " ").trim(); }
+
+/* ---------------- Voice output ---------------- */
+const synth = window.speechSynthesis;
+let voices = [];
+function voiceScore(v){
+  let s = 0; const n = v.name;
+  if (/natural/i.test(n)) s += 50; if (/online/i.test(n)) s += 20; if (/premium|enhanced|neural/i.test(n)) s += 40;
+  if (/google/i.test(n)) s += 15; if (/samantha|ava|zoe|aria|jenny|emma/i.test(n)) s += 10;
+  if (v.lang && v.lang.slice(0,2) === val("lang").slice(0,2)) s += 100;
+  return s;
+}
+function loadVoices(){
+  if (!synth) return;
+  voices = synth.getVoices().slice().sort((a,b) => voiceScore(b) - voiceScore(a));
+  const sel = $("voice"); let saved = sel.value;
+  if (!saved){ try { saved = JSON.parse(localStorage.getItem("tt-settings") || "{}").voice; } catch(e){} }
+  sel.innerHTML = "";
+  voices.forEach(v => { const o = document.createElement("option"); o.value = v.name; o.textContent = `${v.name} (${v.lang})`; sel.appendChild(o); });
+  if (saved && voices.some(v => v.name === saved)) sel.value = saved;
+}
+if (synth){ loadVoices(); synth.onvoiceschanged = loadVoices; }
+
+let speechQueue = [];   // {text, audio: Promise<Blob>|null}
+let playing = false, currentAudio = null, spokenSoFar = "", queueGen = 0;
+
+function enqueueSpeech(text){
+  text = text.trim(); if (!text) return;
+  const item = { text, audio: null };
+  if (val("engine") === "eleven" && val("elevenKey")) item.audio = elevenTTS(text);
+  speechQueue.push(item);
+  if (!playing) playQueue();
+}
+async function elevenTTS(text){
+  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(val("elevenVoiceId"))}?output_format=mp3_44100_128`, {
+    method:"POST", headers:{ "xi-api-key": val("elevenKey"), "Content-Type":"application/json", "Accept":"audio/mpeg" },
+    body: JSON.stringify({ text, model_id: "eleven_flash_v2_5" }) });
+  if (!r.ok) throw new Error("ElevenLabs said " + r.status);
+  return r.blob();
+}
+async function playQueue(){
+  playing = true; const gen = queueGen;
+  while (speechQueue.length && gen === queueGen){
+    const item = speechQueue.shift();
+    setState("speaking"); showCaption(item.text);
+    try {
+      if (item.audio) await playBlob(await item.audio, gen);
+      else await speakBrowser(item.text, gen);
+    } catch(e){ if (gen === queueGen){ try { await speakBrowser(item.text, gen); } catch(_){} statusEl.textContent = "Premium voice failed, using built-in voice. " + (e.message || ""); } }
+    if (gen !== queueGen) break;
+    spokenSoFar += (spokenSoFar ? " " : "") + item.text;
+  }
+  if (gen === queueGen){ playing = false; if (!streaming) turnFinished(); }
+}
+function speakBrowser(text, gen){
+  return new Promise((resolve, reject) => {
+    if (!synth) return reject(new Error("no speech"));
+    const u = new SpeechSynthesisUtterance(text);
+    const v = voices.find(v => v.name === val("voice")); if (v){ u.voice = v; u.lang = v.lang; }
+    u.rate = parseFloat(val("rate")); u.pitch = 1;
+    u.onboundary = e => { if (gen === queueGen && e.name === "word") showCaption(text, e.charIndex); };
+    u.onend = () => resolve(); u.onerror = e => (e.error === "interrupted" || e.error === "canceled") ? resolve() : reject(new Error(e.error));
+    synth.speak(u);
+  });
+}
+function playBlob(blob, gen){
+  return new Promise((resolve, reject) => {
+    if (gen !== queueGen) return resolve();
+    const a = new Audio(URL.createObjectURL(blob)); currentAudio = a;
+    a.onended = () => { currentAudio = null; resolve(); }; a.onerror = () => reject(new Error("audio"));
+    a.play().catch(reject);
+  });
+}
+function stopSpeech(){
+  queueGen++; speechQueue = []; playing = false;
+  if (synth) synth.cancel(); if (currentAudio){ currentAudio.pause(); currentAudio = null; }
+}
+function showCaption(text, charIndex){
+  captionEl.classList.remove("you");
+  if (charIndex == null){ captionEl.textContent = text; return; }
+  captionEl.innerHTML = ""; const s = document.createElement("span"); s.className = "said";
+  s.textContent = text.slice(0, charIndex); captionEl.append(s, document.createTextNode(text.slice(charIndex)));
+}
+$("testVoice").onclick = () => { saveSettings(); stopSpeech(); enqueueSpeech("Hi! I'm your teacher. This is how I sound. What would you like to learn today?"); };
+
+/* ---------------- Claude ---------------- */
+let streaming = false, abortCtl = null, lastReply = "";
+function systemPrompt(){
+  return `${val("persona")}
+
+Class subject: ${val("subject")}
+Student level: ${val("level")}
+
+How this lesson works:
+- The student is talking to you by voice. Everything you write outside a <board> block is read aloud by a speech engine, so write only words meant to be spoken: no markdown, no bullet points, no emoji, no symbols like * or #. Write numbers and formulas the way you'd say them ("x squared plus three").
+- You have a whiteboard. When a picture, a few key words, a formula, a table or a step-by-step would help, write it inside ONE <board>...</board> block per turn. Start your turn with one short spoken sentence, then the <board> block, then the rest of what you say, so the board appears while you're talking. Refer to it naturally ("see the arrow I drew here").
+- Board content is simple HTML: <h2> for a title, <p>, <ul><li>, <b>, <span class="hl"> for a highlight, <table>, and inline <svg> for drawings. For SVG use viewBox="0 0 600 340", stroke="currentColor", fill="none" for shapes, <text> with font-size between 18 and 28, and keep it simple and labeled, like a teacher's sketch. Keep the board short; it's a board, not a textbook.
+- The board stays up until you write a new one. Skip the board for small talk or quick replies.
+- The student may interrupt you mid-sentence. If a previous teacher turn ends with "[interrupted]", the student only heard up to that point; respond to what they said next and don't repeat yourself.`;
+}
+async function askClaude(){
+  const key = val("apiKey");
+  if (!key){ $("keyBanner").hidden = false; $("settings").showModal(); return; }
+  streaming = true; setState("thinking"); statusEl.textContent = "";
+  spokenSoFar = ""; lastReply = ""; let spokenUpTo = 0, boardShown = 0;
+  abortCtl = new AbortController(); const myCtl = abortCtl;
+  const flush = (final) => {
+    const spoken = spokenPart(lastReply);
+    // Hold back text that might be the start of a <board> tag.
+    const rest = spoken.slice(spokenUpTo);
+    const re = /[^.!?…]+[.!?…]+["')\]]*(\s|$)/g; let m, end = 0;
+    while ((m = re.exec(rest))){ if (!final && m.index + m[0].length === rest.length && !/\s$/.test(m[0])) break; end = m.index + m[0].length; }
+    if (final) end = rest.length;
+    if (end > 0){ enqueueSpeech(rest.slice(0, end)); spokenUpTo += end; }
+    const boards = [...lastReply.matchAll(/<board>([\s\S]*?)<\/board>/gi)];
+    if (boards.length > boardShown){ showBoard(boards[boards.length - 1][1]); boardShown = boards.length; }
+  };
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST", signal: myCtl.signal,
+      headers: {
+        "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+        ...(val("model") !== "claude-haiku-5-5" ? { "anthropic-beta": "server-side-fallback-2026-07-01" } : {})
+      },
+      body: JSON.stringify({
+        model: val("model"), max_tokens: 4000, stream: true,
+        output_config: { effort: "low" },
+        ...(val("model") !== "claude-haiku-5-5" ? { fallbacks: "default" } : {}),
+        system: systemPrompt(), messages: history
+      })
+    });
+    if (!res.ok){
+      let msg = `Claude returned an error (${res.status}).`;
+      try { const j = await res.json(); msg += " " + (j.error?.message || ""); } catch(e){}
+      if (res.status === 401) msg = "That API key didn't work. Open Settings and paste it again.";
+      if (res.status === 400 && /credit/i.test(msg)) msg = "Your Anthropic account needs credit. Add some at console.anthropic.com → Billing.";
+      throw new Error(msg);
+    }
+    const reader = res.body.getReader(), dec = new TextDecoder(); let buf = "", stopReason = null;
+    while (true){
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n\n")) >= 0){
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const data = chunk.split("\n").filter(l => l.startsWith("data:")).map(l => l.slice(5).trim()).join("");
+        if (!data) continue; let ev; try { ev = JSON.parse(data); } catch(e){ continue; }
+        if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta"){ lastReply += ev.delta.text; flush(false); }
+        else if (ev.type === "message_delta" && ev.delta?.stop_reason) stopReason = ev.delta.stop_reason;
+        else if (ev.type === "error") throw new Error(ev.error?.message || "Claude stream error");
+      }
+    }
+    if (stopReason === "refusal" && !spokenPart(lastReply)) lastReply = "Hmm, I can't help with that one. Let's try a different question.";
+    flush(true);
+    pushHistory("assistant", lastReply || "(no answer)");
+  } catch(e){
+    if (myCtl.signal.aborted) return; // interrupted: handled by interrupt()
+    statusEl.textContent = e.message; showCaption(e.message);
+    if (history.length && history[history.length - 1].role === "user") history.pop();
+  } finally {
+    if (abortCtl === myCtl){ streaming = false; abortCtl = null; if (!playing) turnFinished(); }
+  }
+}
+function turnFinished(){
+  if (state === "listening") return;
+  setState("idle");
+  if (val("handsFree") && micWanted) startListening();
+}
+
+/* ---------------- Interrupting ---------------- */
+function teacherBusy(){ return streaming || playing; }
+function interrupt(){
+  if (!teacherBusy()) return false;
+  const wasStreaming = streaming;
+  if (abortCtl){ abortCtl.abort(); abortCtl = null; }
+  streaming = false;
+  // Remember only what the student actually heard.
+  const boards = [...lastReply.matchAll(/<board>[\s\S]*?<\/board>/gi)].map(m => m[0]).join("\n");
+  const heard = (spokenSoFar + (boards ? "\n" + boards : "")).trim();
+  const last = history[history.length - 1];
+  if (wasStreaming) pushHistory("assistant", (heard || "...") + " [interrupted]");
+  else if (last && last.role === "assistant") last.content = (heard || "...") + " [interrupted]"; // finished writing, not finished talking
+  stopSpeech(); setState("idle");
+  return true;
+}
+function stopEverything(){ interrupt(); micWanted = false; stopListening(); setState("idle"); }
+$("stop").onclick = stopEverything;
+
+/* ---------------- Voice input ---------------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, micWanted = false, listening = false, finalText = "", interimText = "", silenceTimer = null;
+function words(s){ return s.toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, " ").split(/\s+/).filter(Boolean); }
+// Is this probably the teacher's own voice coming back through the speakers?
+function looksLikeEcho(heard){
+  const h = words(heard); if (!h.length) return true;
+  const recent = new Set(words(captionEl.textContent + " " + (speechQueue[0]?.text || "")));
+  const overlap = h.filter(w => recent.has(w)).length / h.length;
+  return overlap > 0.6;
+}
+if (SR){
+  rec = new SR(); rec.continuous = true; rec.interimResults = true; rec.lang = val("lang");
+  rec.onresult = e => {
+    let interim = "", fin = "";
+    for (let i = e.resultIndex; i < e.results.length; i++){
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) fin += t; else interim += t;
+    }
+    const heardNow = (fin + " " + interim).trim();
+    if (teacherBusy()){
+      if (!val("bargeIn") || words(heardNow).length < 2 || looksLikeEcho(heardNow)) return;
+      interrupt(); setState("listening");
+    }
+    if (fin) finalText += " " + fin;
+    interimText = interim;
+    const shown = (finalText + " " + interimText).trim();
+    if (shown){ captionEl.classList.add("you"); captionEl.textContent = "You: " + shown; }
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(submitHeard, interimText ? 1600 : 1000); // a natural pause ends your turn
+  };
+  rec.onerror = e => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed"){
+      micWanted = false; $("mic").classList.remove("on");
+      $("micHint").textContent = "The browser blocked the microphone. Click the lock or mic icon in the address bar, allow the microphone, then try again.";
+    } else if (e.error === "network"){ $("micHint").textContent = "Speech recognition needs an internet connection."; }
+  };
+  rec.onend = () => { listening = false; if (micWanted) setTimeout(() => { if (micWanted && !listening) startListening(); }, 250); else $("mic").classList.remove("on"); };
+} else {
+  $("micHint").textContent = "This browser can't listen. Use Chrome or Microsoft Edge for voice, or type below.";
+}
+function startListening(){
+  if (!rec) return; micWanted = true; $("mic").classList.add("on");
+  if (!teacherBusy()) setState("listening");
+  if (listening) return;
+  try { rec.lang = val("lang"); rec.start(); listening = true; } catch(e){}
+}
+function stopListening(){ micWanted = false; $("mic").classList.remove("on"); clearTimeout(silenceTimer); if (rec && listening) rec.stop(); }
+function submitHeard(){
+  const q = (finalText + " " + interimText).trim(); finalText = ""; interimText = "";
+  if (!q || teacherBusy()) return;
+  if (!val("handsFree")){ stopListening(); }
+  sendStudent(q);
+}
+function sendStudent(text){
+  text = text.trim(); if (!text) return;
+  interrupt();
+  pushHistory("user", text);
+  captionEl.classList.add("you"); captionEl.textContent = "You: " + text;
+  askClaude();
+}
+$("mic").onclick = () => { if (micWanted){ stopListening(); if (!teacherBusy()) setState("idle"); } else { interrupt(); startListening(); } };
+$("typeForm").addEventListener("submit", e => { e.preventDefault(); const q = $("typed").value; $("typed").value = ""; sendStudent(q); });
+document.addEventListener("keydown", e => {
+  if (e.code !== "Space" || /input|textarea|select/i.test(document.activeElement.tagName) || document.querySelector("dialog[open]")) return;
+  e.preventDefault();
+  if (teacherBusy()){ interrupt(); startListening(); } else if (micWanted){ stopListening(); setState("idle"); } else startListening();
+});
+
+/* ---------------- First run ---------------- */
+if (!val("apiKey")){ statusEl.textContent = "Open Settings to add your API key."; }
+})();
+</script>
+</body>
+</html>

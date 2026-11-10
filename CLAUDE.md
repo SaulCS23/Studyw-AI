@@ -55,6 +55,9 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 <!-- TODO: update as folders are created -->
 ```
 /            → root config, this file, README
+/ai-teacher/          → talking AI teacher, ElevenLabs version (open index.html; see its README)
+/ai-teacher/laptop/   → earlier version: Anthropic API + browser voices
+/student-website/     → clickable prototype of the school site (browser-only data, not secure yet)
 ```
 
 ## Commands
@@ -92,3 +95,5 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 - 2026-11-09: Created repo; using branches + PRs, CLAUDE.md as shared context.
 - 2026-11-09: Human-teacher classes use Jitsi Meet (free). AI teacher voice moving to ElevenLabs.
 - 2026-11-09: Next milestone: deploy the site with real, secure, role-based logins.
+- 2026-11-09: AI teacher prototype added in /ai-teacher: ElevenLabs agent (Claude as LLM) for voice and interruptions, Claude via the Anthropic API for the whiteboard. Keys are entered in the browser, never committed.
+- 2026-11-10: Student website prototype added in /student-website. Data and roles live in the browser only, so it is a design reference until the real backend exists.
