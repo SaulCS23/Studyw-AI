@@ -59,7 +59,9 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 /ai-teacher/laptop/   → earlier version: Anthropic API + browser voices
 /ai-teacher/whiteboard-font.js → single-stroke handwriting font data (Hershey, licence note inside)
 /ai-teacher/whiteboard-hand.js → handwriting engine: text and maths as pen strokes, pen timeline
-/ai-teacher/whiteboard-layout.js → layout engine: places every element in free space, never overlaps, tells the board when to start a new page
+/ai-teacher/whiteboard-layout.js → page layout engine: places every element in free space, never overlaps, tells the board when to start a new page
+/ai-teacher/whiteboard-diagram.js → diagram layout engine: nodes and links to padded shapes, routed connectors, labels beside lines; also graph label placement
+/ai-teacher/PROPOSAL-teaching-coordinator.md → options for tighter voice/whiteboard coordination (needs approval)
 /ai-teacher/whiteboard-core.js → animated whiteboard: schema check, safe maths parser, streaming Claude planner, speech clock (ties steps to the teacher's words)
 /ai-teacher/whiteboard.js      → animated whiteboard: multi-page notebook renderer, pencil, drawing queue, interruption, page navigation
 /ai-teacher/test/     → whiteboard tests and simulated lessons (not used by the product)
@@ -70,7 +72,7 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 <!-- TODO: fill in once the project is scaffolded -->
 - Install: ``
 - Run locally: ``
-- Test: `node --test ai-teacher/test/core.test.js ai-teacher/test/hand.test.js ai-teacher/test/layout.test.js` and `node ai-teacher/test/integration.mjs` (needs Chrome); in a browser open `ai-teacher/test/handwriting.html` (slow-motion pen test) and add `?selftest` to it or to `ai-teacher/test/browser.html`
+- Test: `node --test ai-teacher/test/core.test.js ai-teacher/test/hand.test.js ai-teacher/test/layout.test.js ai-teacher/test/diagram.test.js` and `node ai-teacher/test/integration.mjs` (needs Chrome); in a browser open `ai-teacher/test/handwriting.html` (slow-motion pen test) and add `?selftest` to it or to `ai-teacher/test/browser.html`
 - Lint / format: ``
 
 ## How we work (rules for humans AND Claude)
@@ -105,3 +107,4 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 - 2026-11-10: Student website prototype added in /student-website. Data and roles live in the browser only, so it is a design reference until the real backend exists.
 - 2026-11-16: Animated whiteboard added to the ElevenLabs teacher: a separate Claude call streams schema-checked drawing steps that are drawn by hand (pen strokes from a single-stroke font plus our own maths typesetter, pencil tip visible), no external libraries. The agent's `show_on_board` tool is routed into it instead of painting finished HTML. The classic whole-sketch board stays as the fallback and every fallback is shown (badge, status line, console). Voice sync is time-estimated unless the agent sends character timing.
 - 2026-11-16: The whiteboard became a multi-page teaching notebook. A layout engine places every element (Claude no longer gives positions), starts a new page before drawing when one is full, and keeps all pages; the student can browse pages while the teacher keeps writing on the live page; the teacher can create pages, go to earlier pages and point at earlier content. Steps are tied to the teacher's words (cues) and drawn when those words are reached: exactly if ElevenLabs sends audio alignment (WebSocket only), estimated otherwise.
+- 2026-11-16: The planner now chooses a teaching moment per turn (speak only, write, draw, point, wait), diagrams are described semantically (nodes, links, containers) and laid out by the board (no coordinates from Claude), and spoken references to visuals are scheduled so the picture is ready and the lateness is measured. Whether the existing ElevenLabs agent can fully guarantee voice/board sync is documented in `ai-teacher/PROPOSAL-teaching-coordinator.md`; no agent setting was changed.

@@ -163,9 +163,12 @@
 
   /** Move strokes so the top-left of their ink is at (pad, pad); report the size. */
   function finish(strokes, advanceWidth, extras) {
-    const b = boundsOf(strokes), pad = 2;
-    const shifted = translate(strokes, pad - Math.min(0, b.minX), pad - b.minY);
-    return { strokes: shifted, width: Math.max(advanceWidth, b.maxX - Math.min(0, b.minX)) + pad * 2, height: b.maxY - b.minY + pad * 2, baseline: pad - b.minY, ...extras };
+    const b = boundsOf(strokes), pad = 2, dx = pad - Math.min(0, b.minX);
+    const shifted = translate(strokes, dx, pad - b.minY);
+    const result = { strokes: shifted, width: Math.max(advanceWidth, b.maxX - Math.min(0, b.minX)) + pad * 2, height: b.maxY - b.minY + pad * 2, baseline: pad - b.minY, ...extras };
+    if (extras && extras.relativeX != null) result.relationX = extras.relativeX + dx; // x of the first "=" in the finished block, or undefined
+    delete result.relativeX;
+    return result;
   }
 
   /* ---------- Plain text ---------- */
@@ -373,7 +376,7 @@
   }
 
   function layoutSequence(nodes, ctx) {
-    const s = ctx.s, parts = []; let x = 0, previous = null, gap = 0;
+    const s = ctx.s, parts = []; let x = 0, previous = null, gap = 0, relationX = null;
     for (const node of nodes) {
       const layout = layoutNode(node, ctx);
       let cls = layout.cls || "ord";
@@ -381,6 +384,7 @@
       let before = gap;
       if (cls === "rel") before = Math.max(before, 7 * s); else if (cls === "bin") before = Math.max(before, 5 * s);
       x += before;
+      if (cls === "rel" && relationX === null) relationX = x + layout.box.w / 2; // where the first = (or similar) sits, for aligning calculations
       parts.push({ box: layout.box, dx: x, dy: layout.dy || 0 });
       x += layout.box.w;
       gap = cls === "rel" ? 7 * s : cls === "bin" ? 5 * s : cls === "punct" ? 4 * s : 0;
@@ -389,6 +393,7 @@
     }
     const box = compose(parts);
     box.w = Math.max(box.w, x);
+    box.relationX = relationX;
     return box;
   }
 
@@ -510,7 +515,7 @@
     const ctx = { s: size / UNIT, depth: 0, random: makeRandom(o.seed == null ? latex : o.seed), tilt: 0.012, lift: 0.25, unsupported };
     const box = layoutSequence(tree, ctx);
     warnings.forEach((w) => { if (!unsupported.includes(w)) unsupported.push(w); });
-    return finish(box.strokes, box.w, { unsupported, warnings });
+    return finish(box.strokes, box.w, { unsupported, warnings, relativeX: box.relationX });
   }
 
   /* ---------- Pen timeline ---------- */

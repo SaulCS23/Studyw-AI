@@ -36,6 +36,7 @@ button:focus-visible{outline:3px solid #e8b23a;outline-offset:2px}
 <script src="../whiteboard-font.js"></script>
 <script src="../whiteboard-hand.js"></script>
 <script src="../whiteboard-layout.js"></script>
+<script src="../whiteboard-diagram.js"></script>
 <script src="../whiteboard-core.js"></script>
 <script src="../whiteboard.js"></script>
 <script src="fixtures.js"></script>
@@ -46,7 +47,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const core = WhiteboardCore, F = WhiteboardFixtures;
 // Speech runs much faster than real speech here (40 words a second), so cues arrive quickly. Individual tests slow it down.
 const fastClock = () => new core.SpeechClock({ wordsPerSecond: 40 });
-let board = new Whiteboard($("board"), { timeScale: Number(params.get("speed")) || 1, clock: fastClock() });
+let board = new Whiteboard($("board"), { timeScale: Number(params.get("speed")) || 1, clock: fastClock(), reducedMotion: params.has("still") ? true : undefined }); // ?still: no animation, for clean screenshots
 
 /** Play a lesson turn the way the live page does: tell the board what is being said, validate against the notebook, queue the steps. */
 function playTurn(wb, turn) {
@@ -71,14 +72,14 @@ const wanted = params.get("lesson");
 if (wanted) {
   const order = [F.mathematics, F.biology, F.history, F.topicChange, F.handwriting];
   const index = order.findIndex((l) => l.subject.startsWith(wanted));
-  (async () => { if (wanted === "long") await playLesson(board, F.longLesson(12)); else for (let i = 0; i <= index; i++) { await playLesson(board, order[i]); if (params.has("view") && i === index) break; } if (params.get("page")) board.viewPage(Number(params.get("page"))); if (params.has("dump")) $("results").textContent = JSON.stringify(board.summary().map((i) => [i.id, i.page, Math.round(i.x), Math.round(i.y), Math.round(i.w), Math.round(i.h)])); document.title += " (done)"; })();
+  (async () => { if (wanted === "long") await playLesson(board, F.longLesson(12)); else if (wanted === "longd") await playLesson(board, F.longDiagrams(9)); else if (wanted === "gref") await playLesson(board, F.graphWithReference); else for (let i = 0; i <= index; i++) { await playLesson(board, order[i]); if (params.has("view") && i === index) break; } if (params.get("page")) board.viewPage(Number(params.get("page"))); if (params.has("dump")) $("results").textContent = JSON.stringify(board.summary().map((i) => [i.id, i.page, Math.round(i.x), Math.round(i.y), Math.round(i.w), Math.round(i.h)])); document.title += " (done)"; })();
 }
 
 /* ---------- Geometry helpers: measure what is really on the page ---------- */
 
 /** The ink of a top-level item in page coordinates. Graphs and diagram groups use their frame (curves are clipped to it). */
 function inkBox(item) {
-  if (item.type === "graph" || item.type === "group") return { ...item.bbox };
+  if (item.type === "graph" || item.type === "group" || item.type === "diagram") return { ...item.bbox };
   const b = item.g.getBBox(), m = /translate\(([-\d.]+)[ ,]+([-\d.]+)\)/.exec(item.g.getAttribute("transform") || "");
   const dx = m ? +m[1] : 0, dy = m ? +m[2] : 0;
   return { x: b.x + dx, y: b.y + dy, w: b.width, h: b.height };
@@ -93,7 +94,7 @@ function geometryProblems(wb, gap = 6) {
     for (const { id, box } of boxes) if (box.x < 20 || box.y < 20 || box.x + box.w > 980 || box.y + box.h > 580) problems.push(`${page.id}: ${id} leaves the page ${JSON.stringify(box)}`);
     for (let a = 0; a < boxes.length; a++) for (let b = a + 1; b < boxes.length; b++) if (!apart(boxes[a].box, boxes[b].box, gap)) problems.push(`${page.id}: ${boxes[a].id} and ${boxes[b].id} overlap ${JSON.stringify(boxes[a].box)} ${JSON.stringify(boxes[b].box)}`);
     for (const item of top) { // what is drawn inside a graph or a diagram frame stays inside it
-      if (item.type !== "group" && item.type !== "graph") continue;
+      if (item.type !== "group" && item.type !== "graph" && item.type !== "diagram") continue;
       for (const childId of item.children) {
         const child = wb.items.get(childId); if (!child || child.type === "plot" || child.type === "point") continue;
         const g = child.g.getBBox();
@@ -102,6 +103,65 @@ function geometryProblems(wb, gap = 6) {
     }
   }
   return problems;
+}
+
+/** The ink of a hand-written block inside an item, in page coordinates (drawn inside diagram frames, so add the frame's offset). */
+function handInk(item, frame) {
+  const g = item.g.querySelector("[data-wb-hand]"); if (!g) return null;
+  const b = g.getBBox(), m = /translate\(([-\d.]+)[ ,]+([-\d.]+)\)/.exec(item.g.getAttribute("transform") || "");
+  return { x: frame.x + b.x + (m ? +m[1] : 0), y: frame.y + b.y + (m ? +m[2] : 0), w: b.width, h: b.height };
+}
+/**
+ * What the eye would notice in a diagram, measured on the REAL drawn ink: text inside a shape has breathing room from
+ * its border; no connector runs through a node's text; no connector label sits on a line, a node or another label.
+ */
+function diagramInkProblems(wb) {
+  const out = [];
+  for (const diagram of wb.items.values()) {
+    if (diagram.type !== "diagram" || !diagram.layout) continue;
+    const frame = diagram.frame, nodes = [...diagram.children].map((id) => wb.items.get(id)).filter((i) => i && i.type === "node");
+    const toPage = (pt) => [frame.x + pt[0], frame.y + pt[1]];
+    const nodeInk = new Map(), nodeBox = new Map();
+    for (const n of nodes) {
+      const L = diagram.layout.nodes.get(n.id), ink = handInk(n, frame); if (!L || !ink) continue;
+      nodeInk.set(n.id, ink); nodeBox.set(n.id, { x: frame.x + L.x, y: frame.y + L.y, w: L.w, h: L.h, shape: L.shape, container: L.container });
+      const b = nodeBox.get(n.id);
+      if (L.shape === "ellipse" || L.shape === "circle") {
+        const cx = b.x + b.w / 2, cy = b.y + b.h / 2, a = b.w / 2, c = b.h / 2;
+        for (const [px, py] of [[ink.x, ink.y], [ink.x + ink.w, ink.y], [ink.x, ink.y + ink.h], [ink.x + ink.w, ink.y + ink.h]]) if (((px - cx) / a) ** 2 + ((py - cy) / c) ** 2 > 0.95) out.push(`${n.id}: text touches the curve`);
+      } else if (L.shape !== "none") {
+        const pad = Math.min(ink.x - b.x, b.x + b.w - (ink.x + ink.w), L.container ? 99 : ink.y - b.y, L.container ? 99 : b.y + b.h - (ink.y + ink.h));
+        if (pad < 6) out.push(`${n.id}: text is only ${Math.round(pad)} units from the border of its ${L.shape}`);
+      }
+    }
+    const lines = diagram.layout.links.map((l) => ({ id: l.id, from: l.from, to: l.to, pts: l.points.map(toPage) }));
+    const hits = (pts, r) => pts.some((p, i) => i > 0 && WhiteboardDiagram.segmentHitsRect(pts[i - 1], p, r));
+    for (const line of lines) for (const [id, ink] of nodeInk) if (hits(line.pts, WhiteboardDiagram.inflate(ink, 2))) out.push(`connector ${line.id} runs through the text of ${id}`);
+    const labels = [];
+    for (const link of [...diagram.children].map((id) => wb.items.get(id)).filter((i) => i && i.type === "link")) {
+      const ink = handInk(link, frame); if (!ink) continue; labels.push({ id: link.id, ink });
+      for (const line of lines) if (hits(line.pts, WhiteboardDiagram.inflate(ink, 1))) out.push(`the label of ${link.id} touches the line ${line.id}`);
+      for (const [id, b] of nodeBox) if (WhiteboardDiagram.overlaps(WhiteboardDiagram.inflate(ink, 1), b)) out.push(`the label of ${link.id} sits on ${id}`);
+    }
+    for (let i = 0; i < labels.length; i++) for (let j = i + 1; j < labels.length; j++) if (WhiteboardDiagram.overlaps(WhiteboardDiagram.inflate(labels[i].ink, 1), labels[j].ink)) out.push(`labels of ${labels[i].id} and ${labels[j].id} overlap`);
+  }
+  return out;
+}
+/** Labels on a graph sit beside what they name: not on a curve, an axis, a number or another label. */
+function graphLabelProblems(wb) {
+  const out = [];
+  for (const graph of wb.items.values()) {
+    if (graph.type !== "graph" || !graph.graph || !graph.graph.obstacles) continue;
+    const { obstacles } = graph.graph, origin = graph.bbox;
+    const labels = [...graph.children].map((id) => wb.items.get(id)).filter((i) => i && (i.type === "plot" || i.type === "point")).map((i) => ({ i, ink: handInk(i, { x: 0, y: 0 }) })).filter((x) => x.ink);
+    for (const { i, ink } of labels) {
+      const local = { x: ink.x - 0 - 0, y: ink.y, w: ink.w, h: ink.h }; // ink is in the graph's own coordinates here
+      const box = { x: local.x - 1, y: local.y - 1, w: local.w + 2, h: local.h + 2 };
+      for (const line of obstacles.lines) if (WhiteboardDiagram.polylineHitsRect(line, box)) out.push(`label of ${i.id} touches a curve`);
+      for (const r of obstacles.rects.slice(0, 2)) if (WhiteboardDiagram.overlaps(box, r)) out.push(`label of ${i.id} sits on an axis`);
+    }
+  }
+  return out;
 }
 
 /* ---------- Automatic checks: ?selftest ---------- */
@@ -125,27 +185,41 @@ async function runSelfTest() {
     let problems = geometryProblems(wb);
     check("maths: ZERO overlap between elements, everything inside the page", problems.length === 0, problems.join(" | "));
     const c = ["c1", "c2", "c3"].map((id) => wb.items.get(id));
-    check("maths: the lines of one calculation stay together on one page, left aligned and tightly stacked", c.every((i) => i.page === c[0].page) && c.every((i) => Math.abs(i.bbox.x - c[0].bbox.x) < 0.5) && c[1].bbox.y > c[0].bbox.y + c[0].bbox.h && c[1].bbox.y - (c[0].bbox.y + c[0].bbox.h) < 18 && c[2].bbox.y - (c[1].bbox.y + c[1].bbox.h) < 18, JSON.stringify(c.map((i) => i.bbox)));
+    check("maths: the lines of one calculation stay together on one page and are tightly stacked", c.every((i) => i.page === c[0].page) && c[1].bbox.y > c[0].bbox.y + c[0].bbox.h && c[1].bbox.y - (c[0].bbox.y + c[0].bbox.h) < 18 && c[2].bbox.y - (c[1].bbox.y + c[1].bbox.h) < 18, JSON.stringify(c.map((i) => i.bbox)));
+    const equalsX = c.map((i) => i.bbox.x + WhiteboardHand.typesetMath(i.text, { size: 34 }).relationX);
+    check("maths: the = signs of the calculation line up vertically (aligned equations)", Math.max(...equalsX) - Math.min(...equalsX) < 1.5, JSON.stringify(equalsX.map(Math.round)));
     const g = wb.items.get("g").bbox, eq = wb.items.get("eq").bbox;
     check("maths: the graph sits beside the equation when there is room (side by side)", g.x >= eq.x + eq.w && g.y < eq.y + eq.h + 200, JSON.stringify({ eq, g }));
     check("maths: the highlight does not collide with neighbours", (() => { const m = wb.items.get("eq").marker.getBBox(); return apart({ x: m.x, y: m.y, w: m.width, h: m.height }, inkBox(wb.items.get("g")), 0) && apart({ x: m.x, y: m.y, w: m.width, h: m.height }, inkBox(wb.items.get("title")), 0); })());
     check("maths: curve plotted from the expression; graph numbers are handwriting", wb.items.get("curve").g.querySelector("path").getAttribute("d").split("L").length > 100 && !wb.svg.querySelector("text, foreignObject"));
 
-    /* 2. Biology and history: diagrams drawn inside frames, labels kept apart, nothing overlapping */
-    wb = fresh({ timeScale: 60 });
+    /* 2. Biology, history and cells: semantic diagrams. Text sits inside shapes with padding, connectors never cross text, labels sit beside lines */
+    wb = fresh({ timeScale: 80 });
     await playLesson(wb, F.biology);
     problems = geometryProblems(wb);
-    check("biology: the whole diagram (frame, shapes, labels, equations beside it) is drawn", ["btitle", "leaf", "sun", "chloroplast", "co2", "inputs", "outputs"].every((id) => wb.items.has(id)), ids(wb).join(","));
+    check("biology: the whole diagram (title, shapes, container and its child, arrows) is drawn", ["btitle", "photo", "sun", "inputs", "leaf", "chl", "out", "photo-l1", "photo-l2", "photo-l3"].every((id) => wb.items.has(id)), ids(wb).join(","));
     check("biology: no overlap, and the diagram's parts stay inside their frame", problems.length === 0, problems.join(" | "));
-    const leaf = wb.items.get("leaf").bbox, inputs = wb.items.get("inputs").bbox, outputs = wb.items.get("outputs").bbox;
-    check("biology: the explanation sits beside its diagram, and the second equation below the first", inputs.x >= leaf.x + leaf.w && outputs.y >= inputs.y + inputs.h, JSON.stringify({ leaf, inputs, outputs }));
-    wb = fresh({ timeScale: 60 });
+    let drawn = diagramInkProblems(wb);
+    check("biology: on the real drawn ink, text has padding inside its shape and no arrow or label touches any text", drawn.length === 0, drawn.join(" | "));
+    const photo = wb.items.get("photo"), chl = wb.items.get("chl").bbox, leaf = wb.items.get("leaf").bbox;
+    check("biology: the chloroplast is drawn INSIDE the leaf, below the leaf's title", chl.x > leaf.x && chl.x + chl.w < leaf.x + leaf.w && chl.y > leaf.y + 20 && chl.y + chl.h < leaf.y + leaf.h, JSON.stringify({ leaf, chl }));
+    check("biology: the diagram is one frame holding everything, within the page", photo.frame.x + photo.frame.w <= 970 && photo.frame.y + photo.frame.h <= 570 && wb.pages.length === 1);
+    wb = fresh({ timeScale: 80 });
     await playLesson(wb, F.history);
-    problems = geometryProblems(wb);
-    check("history: timeline drawn with a spoken correction, still no overlap", wb.items.get("t3").text === "476: West falls" && problems.length === 0, problems.join(" | ") + wb.items.get("t3").text);
-    const labels = ["t1", "t2", "t3"].map((id) => wb.items.get(id).bbox);
-    check("history: the corrected label does not land on its neighbours", apart(labels[0], labels[2], 4) && apart(labels[1], labels[2], 4), JSON.stringify(labels));
-    check("history: only one element holds the corrected id", wb.svg.querySelectorAll('[data-wb-id="t3"]').length === 1);
+    problems = geometryProblems(wb); drawn = diagramInkProblems(wb);
+    check("history: a timeline of three boxes joined by arrows, with a spoken correction below it, zero overlap", wb.items.get("fallnote").text === "Fall of the West: 476" && problems.length === 0 && drawn.length === 0, problems.join(" | ") + drawn.join(" | "));
+    const tl = wb.items.get("tl").bbox, note = wb.items.get("fallnote").bbox;
+    check("history: the note sits below the timeline (near/side), the corrected text where the old text was", note.y >= tl.y + tl.h && wb.svg.querySelectorAll('[data-wb-id="fallnote"]').length === 1, JSON.stringify({ tl, note }));
+    wb = fresh({ timeScale: 80 });
+    await playLesson(wb, F.topicChange);
+    drawn = diagramInkProblems(wb);
+    check("cells: a container holds two children, a connector with a label points at it, nothing collides", ["title2", "cellg", "cell", "nuc", "mito", "wall", "cellg-l1"].every((id) => wb.items.has(id)) && drawn.length === 0 && geometryProblems(wb).length === 0, drawn.join(" | "));
+    wb = fresh({ timeScale: 80 });
+    await playLesson(wb, F.handwriting);
+    drawn = diagramInkProblems(wb);
+    check("cycle: four shapes in a ring (ellipse, circle, rounded boxes), four labelled arrows, nothing collides", ["cycle", "evap", "cloud", "rain", "sea", "cycle-l1", "cycle-l2", "cycle-l3", "cycle-l4"].every((id) => wb.items.has(id)) && drawn.length === 0, drawn.join(" | "));
+    const ring = ["evap", "cloud", "rain", "sea"].map((id) => wb.items.get(id).bbox);
+    check("cycle: the ring goes clockwise (top-left, top-right, bottom-right, bottom-left)", ring[0].x < ring[1].x && ring[1].y < ring[2].y && ring[3].x < ring[2].x && ring[0].y < ring[3].y, JSON.stringify(ring));
 
     /* 3. A long lesson makes new pages by itself, before drawing, and never overlaps */
     wb = fresh({ timeScale: 80, ...quiet() });
@@ -171,7 +245,7 @@ async function runSelfTest() {
     await playLesson(wb, F.biology); await playLesson(wb, F.history); await playLesson(wb, F.topicChange);
     check("topic change: each new topic starts a new page; nothing is destroyed", wb.pages.length === mathPages + 3 && wb.pages.slice(mathPages).map((p) => p.title).join(",") === "Photosynthesis,Rome,Cells", wb.pages.length + " pages: " + wb.pages.map((p) => p.title).join(","));
     check("topic change: earlier pages keep every element and their pen strokes", mathIds.every((id) => wb.items.has(id) && wb.items.get(id).page.number <= mathPages) && strokesOnMathPages() === mathStrokes && mathStrokes > 60, mathStrokes + " vs " + strokesOnMathPages());
-    check("topic change: the new subject is on its own page", ["title2", "cellg", "cell", "nucleus", "nlabel"].every((id) => wb.items.get(id) && wb.items.get(id).page === wb.pages[wb.pages.length - 1]));
+    check("topic change: the new subject is on its own page", ["title2", "cellg", "cell", "nuc", "mito", "wall"].every((id) => wb.items.get(id) && wb.items.get(id).page === wb.pages[wb.pages.length - 1]));
     check("topic change: the empty first page was reused, not left blank before the new topic", wb.pages.every((p) => p.ids.size > 0));
     problems = geometryProblems(wb);
     check("topic change: still zero overlap across every page", problems.length === 0, problems.join(" | "));
@@ -288,6 +362,112 @@ async function runSelfTest() {
     wb.beginTurn(sentence.teacher); wb.speechStart(); wb.enqueue(ops(sentence.ops, wb));
     await sleep(150); wb.cancelPending(); await wb.idle(); const afterCancel = ids(wb).length; await sleep(1500);
     check("cues: after an interruption the waiting steps are never drawn (no outdated explanation)", ids(wb).length === afterCancel && !wb.items.has("s3"), ids(wb).join(","));
+
+    /* 8b. TEACHING MOMENTS: sometimes speak only, sometimes write while saying it, draw while explaining, point, or ask and wait */
+    const stamp = () => wb.now();
+    // (1) A verbal introduction with no drawing: the board does not change, and that is recorded as a choice, not a failure
+    wb = fresh({ timeScale: 60 });
+    await playLesson(wb, F.mathematics);
+    const beforeSpeak = wb.items.size, pagesBeforeSpeak = wb.pages.length;
+    playTurn(wb, F.speakOnly.turns[0]); await wb.idle();
+    check("moments (1) speak only: a verbal introduction draws nothing and the board is unchanged", wb.items.size === beforeSpeak && wb.pages.length === pagesBeforeSpeak && wb.moments.at(-1).kind === "speak_only", JSON.stringify(wb.moments.at(-1)));
+    // (2) An equation is written DURING the matching explanation (not before it, not long after)
+    const slowSpeech = () => new core.SpeechClock({ wordsPerSecond: 6 });
+    wb = fresh({ timeScale: 4, clock: slowSpeech() });
+    const wws = F.writeWhileSaying.turns[0];
+    wb.beginTurn(wws.teacher); wb.speechStart(); const spoke0 = stamp();
+    wb.enqueue(ops(wws.ops, wb)); await wb.idle();
+    const cueDue = wb.clock.timeOf("the area is one half") - spoke0, area = wb.timeline.find((t) => t.id === "area");
+    const startedAfter = area.startedAt - spoke0;
+    check("moments (2) write while saying: the formula starts when the teacher says it (not before, and within about a second after)", startedAfter >= cueDue - 600 && startedAfter <= cueDue + 1100, `cue at ${Math.round(cueDue)} ms, started ${Math.round(startedAfter)} ms`);
+    check("moments (2) write while saying: it was NOT written during the earlier sentences (the example was introduced verbally first)", startedAfter > wb.clock.estimateMs("Let's start with an example. Imagine a triangle. ") - 600, `started ${Math.round(startedAfter)} ms`);
+    // (3) A graph discussed only when its elements are visible: the vertex is finished before "look at the vertex"
+    wb = fresh({ timeScale: 3, clock: new core.SpeechClock({ wordsPerSecond: 5 }) });
+    const gwr = F.graphWithReference.turns[0];
+    wb.beginTurn(gwr.teacher); wb.speechStart();
+    wb.enqueue(ops(gwr.ops, wb)); await wb.idle();
+    const vertex = wb.timeline.find((t) => t.id === "pvertex"), curveStep = wb.timeline.find((t) => t.id === "pcurve"), graphStep = wb.timeline.find((t) => t.id === "pg");
+    check("moments (3) graph with a reference: the graph, the curve and the vertex were drawn in the order they are introduced", graphStep.startedAt <= curveStep.startedAt && curveStep.finishedAt <= vertex.startedAt + 1, JSON.stringify([graphStep, curveStep, vertex].map((t) => [t.id, Math.round(t.startedAt % 100000), Math.round(t.finishedAt % 100000)])));
+    check("moments (3) graph with a reference: the vertex was FINISHED by the time the teacher said 'look at the vertex' (measured, not assumed)", vertex.refLateMs !== undefined && vertex.refLateMs <= 600 && wb.syncStats.refs >= 1, "finished " + vertex.refLateMs + " ms after the reference");
+    check("moments (3) graph with a reference: the vertex label sits beside its point, off the curve and the axes", graphLabelProblems(wb).length === 0, graphLabelProblems(wb).join(" | "));
+    // (4) Pointing happens when the teacher refers to the object
+    wb = fresh({ timeScale: 20, clock: new core.SpeechClock({ wordsPerSecond: 5 }) });
+    await playLesson(Object.assign(wb, {}), { turns: [{ teacher: "x", ops: [] }] });
+    wb.reset(); wb.clock = new core.SpeechClock({ wordsPerSecond: 5 });
+    wb.enqueue(ops(F.mathematics.turns[0].ops.slice(0, 2), wb)); await wb.idle();
+    const pae = F.pointAndExplain.turns[0];
+    wb.beginTurn(pae.teacher); wb.speechStart(); const pointT0 = stamp();
+    let ringAt = null; const ringWatch = setInterval(() => { if (ringAt === null && wb.svg.querySelector("[data-wb-pointer]")) ringAt = stamp() - pointT0; }, 10);
+    wb.enqueue(ops(pae.ops, wb)); await wb.idle(); clearInterval(ringWatch);
+    const referDue = wb.clock.timeOf("the exponent here") - pointT0;
+    check("moments (4) point and explain: the pointer circles the equation when the teacher refers to it (within a second of those words)", ringAt !== null && ringAt >= referDue - 600 && ringAt <= referDue + 1000, `refers at ${Math.round(referDue)} ms, pointer at ${Math.round(ringAt)} ms`);
+    check("moments (4) point and explain: the highlight came later, at its own words", wb.items.get("eq").marker && wb.timeline.find((t) => t.op === "highlight").startedAt - pointT0 > referDue, "");
+    // (5) A question to the student leaves the board unchanged, and the answer is never written
+    wb = fresh({ timeScale: 60 });
+    await playLesson(wb, F.mathematics);
+    const beforeQ = wb.items.size;
+    playTurn(wb, F.question.turns[0]); await wb.idle();
+    check("moments (5) question: a question to the student leaves the board unchanged and the board waits", wb.items.size === beforeQ && wb.waiting === true && wb.moments.at(-1).kind === "wait");
+    wb.enqueue(ops([{ op: "write", content: "should not appear", id: "ignored" }], wb)); await wb.idle();
+    check("moments (5) question: nothing more is drawn while the student is thinking", !wb.items.has("ignored"));
+    wb.beginTurn("The student answered."); wb.enqueue(ops([{ op: "write", content: "now it may", id: "allowed" }], wb)); await wb.idle();
+    check("moments (5) question: drawing resumes on the next turn", wb.items.has("allowed"));
+    wb = fresh({ timeScale: 60, clock: fastClock() });
+    playTurn(wb, F.questionAfterDrawing.turns[0]); await wb.idle();
+    check("moments (5) question: what the question needs is drawn; the ANSWER, queued after the wait, is dropped", wb.items.has("lineq") && !wb.items.has("leaked") && wb.waiting, ids(wb).join(","));
+    wb.cancelPending();
+    check("moments (5) question: the student speaking (an interruption) ends the wait", wb.waiting === false);
+    // A planner that returns steps AFTER a question in the same plan can never write them
+    wb = fresh({ timeScale: 60, clock: fastClock() });
+    wb.enqueue(ops([{ op: "write", content: "question setup", id: "q1" }, { op: "moment", kind: "wait" }], wb)); await wb.idle();
+    wb.enqueue(ops([{ op: "write", content: "late streamed answer", id: "late1" }], wb)); await wb.idle();
+    check("moments (5) question: steps that stream in after the wait are discarded (the plan is still arriving while the teacher asks)", wb.items.has("q1") && !wb.items.has("late1"));
+    // the teacher says "look at the point I just drew" and the planner drew nothing: reported by the references helper (a missing reference is measurable)
+    check("moments: a reference with nothing to back it is detectable from the words alone", core.findReferences(F.missingReference.turns[0].teacher).length >= 1 && F.missingReference.turns[0].ops.every((o) => o.op === "moment"));
+
+    /* 8c. REALISTIC AUDIO: delayed, missing and out-of-order alignment events, at the renderer */
+    const sent = F.sentences.turns[0];
+    const chunks = ["First we look at the triangle. ", "Then we mark the right angle. ", "Finally we write the formula for the area."];
+    const appearTimes = async (wb2) => { const t = {}, t0 = performance.now(); const timer = setInterval(() => { for (const id of ["s1", "s2", "s3"]) if (!(id in t) && wb2.items.has(id)) t[id] = Math.round(performance.now() - t0); }, 15); await wb2.idle(); clearInterval(timer); return t; };
+    // out of order: chunk 3 and 2 arrive before chunk 1, with event ids; the words are put back in speaking order
+    wb = fresh({ timeScale: 60, clock: new core.SpeechClock({ wordsPerSecond: 3 }) });
+    wb.beginTurn(sent.teacher); wb.speechStart(); wb.enqueue(ops(sent.ops, wb));
+    wb.speechProgress(chunks[2], null, 3); wb.speechProgress(chunks[1], null, 2);
+    await sleep(120);
+    check("audio out of order: later chunks alone do not release the first step before the chunks around them are known", wb.clock.chars.join("") === chunks[1] + chunks[2], wb.clock.chars.join(""));
+    wb.speechProgress(chunks[0], null, 1);
+    check("audio out of order: once the late chunk arrives the spoken text is in speaking order", wb.clock.chars.join("") === chunks.join(""), wb.clock.chars.join(""));
+    let t = await appearTimes(wb);
+    check("audio out of order: all three steps are drawn, in speaking order", ["s1", "s2", "s3"].every((id) => id in t) && t.s1 <= t.s2 && t.s2 <= t.s3, JSON.stringify(t));
+    // delayed: the voice starts long after the text (a slow network): nothing is drawn early
+    wb = fresh({ timeScale: 60, clock: new core.SpeechClock({ wordsPerSecond: 8 }) });
+    wb.beginTurn(sent.teacher); wb.enqueue(ops(sent.ops, wb));
+    await sleep(500);
+    check("audio delayed: if the voice has not started, only what is due at the very start of the turn is drawn", !wb.items.has("s3") && !wb.items.has("s2"), ids(wb).join(","));
+    wb.speechStart(); t = await appearTimes(wb);
+    check("audio delayed: when the voice finally starts, everything is drawn in order", wb.items.has("s3"), JSON.stringify(t));
+    // missing: one chunk never arrives; its step is still drawn (estimate + grace) and nothing hangs
+    wb = fresh({ timeScale: 60, clock: new core.SpeechClock({ wordsPerSecond: 12, graceMs: 400 }) });
+    wb.beginTurn(sent.teacher); wb.speechStart(); wb.enqueue(ops(sent.ops, wb));
+    wb.speechProgress(chunks[0], null, 1); wb.speechProgress(chunks[2], null, 3); // chunk 2 is lost
+    t = await appearTimes(wb);
+    check("audio missing: a lost chunk delays only its own step, which is still drawn by the estimate; nothing hangs", ["s1", "s2", "s3"].every((id) => id in t), JSON.stringify(t));
+    // the voice stops mid-turn (the student interrupts the teacher): anything still waiting is dropped, nothing is drawn late
+    wb = fresh({ timeScale: 60, clock: new core.SpeechClock({ wordsPerSecond: 4 }) });
+    wb.beginTurn(sent.teacher); wb.speechStart(); wb.enqueue(ops(sent.ops, wb));
+    await sleep(300); wb.cancelPending(); await wb.idle(); const countAtCut = ids(wb).length; await sleep(1500);
+    check("audio interrupted: the steps that were waiting for words never spoken are discarded (no outdated drawing)", ids(wb).length === countAtCut && !wb.items.has("s3"), ids(wb).join(","));
+
+    /* 8d. A long lesson of DIAGRAMS: several pages, every diagram clean and readable */
+    wb = fresh({ timeScale: 90 });
+    const longD = F.longDiagrams(9);
+    await playLesson(wb, longD);
+    const diagrams = [...wb.items.values()].filter((i) => i.type === "diagram");
+    problems = geometryProblems(wb); drawn = diagramInkProblems(wb);
+    check("long diagram lesson: all 9 diagrams and notes drawn across several pages", diagrams.length === 9 && wb.pages.length >= 4, diagrams.length + " diagrams on " + wb.pages.length + " pages");
+    check("long diagram lesson: zero overlap on every page", problems.length === 0, problems.slice(0, 3).join(" | "));
+    check("long diagram lesson: every diagram is clean on the real ink (padding, no connector through text, no label on a line)", drawn.length === 0, drawn.slice(0, 4).join(" | "));
+    check("long diagram lesson: no diagram is squeezed: every frame fits its page and every node keeps the normal handwriting size", diagrams.every((d) => d.layout.fits) && [...wb.items.values()].filter((i) => i.type === "node").every((n) => n.g.querySelector("[data-wb-hand]").getAttribute("stroke-width") === [...wb.items.values()].find((m) => m.type === "node").g.querySelector("[data-wb-hand]").getAttribute("stroke-width")));
 
     /* 9. Safety, pace and robustness carried over from before */
     wb = fresh({ timeScale: 60 });

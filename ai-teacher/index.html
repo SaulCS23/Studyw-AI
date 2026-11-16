@@ -10,6 +10,7 @@
 <script defer src="whiteboard-font.js"></script>
 <script defer src="whiteboard-hand.js"></script>
 <script defer src="whiteboard-layout.js"></script>
+<script defer src="whiteboard-diagram.js"></script>
 <script defer src="whiteboard-core.js"></script>
 <script defer src="whiteboard.js"></script>
 <style>
@@ -237,7 +238,7 @@ function boardEvent(kind, level, message){
   (console[level] || console.log)("[Whiteboard] " + message);
   boardLog.push({ at: new Date().toISOString().slice(11, 23), kind, level, message }); if (boardLog.length > 200) boardLog.shift();
 }
-function engineReady(){ return !!(window.Whiteboard && window.WhiteboardCore && window.WhiteboardHand && window.WhiteboardLayout && window.WhiteboardFontData); }
+function engineReady(){ return !!(window.Whiteboard && window.WhiteboardCore && window.WhiteboardHand && window.WhiteboardLayout && window.WhiteboardDiagram && window.WhiteboardFontData); }
 function useAnimatedBoard(){ return $("boardStyle").value === "animated" && engineReady(); }
 function refreshBadge(){
   if ($("boardStyle").value === "classic") setBadge("Classic (chosen in Setup)");
@@ -248,6 +249,8 @@ function getWhiteboard(){
   if (!whiteboard && engineReady()) whiteboard = new window.Whiteboard(wbHost, {
     log: (level, message) => boardEvent("engine", level, message),
     onNotebook: updateNotebook,
+    onMoment: (m) => boardEvent("moment", "info", "Teaching moment: " + m.kind.replace("_", " ") + (m.note ? " (" + m.note + ")" : "") + (m.kind === "wait" ? ". Drawing pauses until the student answers." : ".")),
+    onRef: (r) => boardEvent("sync", r.late ? "warn" : "info", 'Reference "' + r.ref + '": ' + r.id + " was finished " + (r.finishedAfterReferenceMs <= 0 ? Math.abs(r.finishedAfterReferenceMs) + " ms before" : r.finishedAfterReferenceMs + " ms after") + " the teacher said it" + (r.late ? " (too late)." : ".")),
     onGate: (g) => boardEvent("sync", "info", "Step " + g.op + (g.id ? " " + g.id : "") + ' (cue "' + g.cue + '") released: ' + g.reason + " after " + g.waitedMs + " ms."),
   });
   return whiteboard;
@@ -284,6 +287,13 @@ function interruptBoard(){
   clearTimeout(toolTimer);
   for (const timer of planTimers) clearTimeout(timer); planTimers.clear();
   if (useAnimatedBoard()){ boardReq++; turnReq++; clearTimeout(boardTimer); }
+}
+/* One line per turn that says how the writing kept up with the voice, from real measurements (not estimates of quality). */
+let lastSync = "";
+function reportSync(){
+  const s = whiteboard.syncStats, released = Object.entries(s.released).map(([k, v]) => k + " " + v).join(", ");
+  const line = "Sync so far: steps released by [" + (released || "none") + "]; spoken references checked " + s.refs + ", late " + s.lateRefs + (s.lateRefs ? " (worst " + s.worstLateMs + " ms)" : "") + ".";
+  if (line !== lastSync){ lastSync = line; boardEvent("sync", s.lateRefs ? "warn" : "info", line); }
 }
 function abortPlans(){ for (const c of plans) c.abort(); plans.clear(); }
 function htmlToText(html){ // what the agent's own board HTML says, without drawing it
@@ -335,7 +345,15 @@ async function drawAnimatedBoard(options){
   lastPlanStart = Date.now();
   const t0 = performance.now(); let firstStepMs = null, steps = 0;
   const stale = () => myTurn !== turnReq, previous = firstPlanDone;
-  const deliver = (ops) => { if (firstStepMs === null){ firstStepMs = Math.round(performance.now() - t0); showSurface("animated"); setBadge("Animated · drawing", "live"); boardEvent("first-step", "info", "First drawing step arrived after " + firstStepMs + " ms; the pen starts now."); } steps += ops.length; board.enqueue(ops); };
+  let momentSeen = null;
+  const early = !!options.text && !options.handled; // this plan has only the first sentence of the turn
+  const deliver = (ops) => {
+    // A "wait" decided from the first sentence alone (a rhetorical "Where will it land?") must not stop the rest of the turn.
+    if (early && ops.some(o => o.op === "moment" && o.kind === "wait")){ boardEvent("moment", "info", "Ignoring a wait decided from the first sentence only; the rest of the turn is planned separately."); ops = ops.filter(o => !(o.op === "moment" && o.kind === "wait")); }
+    const drawing = ops.filter(o => o.op !== "moment"); ops.forEach(o => { if (o.op === "moment") momentSeen = o.kind; });
+    if (drawing.length && firstStepMs === null){ firstStepMs = Math.round(performance.now() - t0); showSurface("animated"); setBadge("Animated · drawing", "live"); boardEvent("first-step", "info", "First drawing step arrived after " + firstStepMs + " ms; the pen starts now."); }
+    steps += drawing.length; board.enqueue(ops);
+  };
   let resolveDone; const done = new Promise(r => { resolveDone = r; });
   if (!options.handled) firstPlanDone = done;
   // A continuation's steps wait for the first part of the turn, then flow as they arrive (speaking order, no waiting for the end of the stream).
@@ -345,14 +363,16 @@ async function drawAnimatedBoard(options){
   boardEvent("planning", "info", "Asking Claude what to draw (" + transcript.length + " turns, " + board.summary().length + " items on " + board.state().pages.length + " page(s)" + (options.handled ? ", continuing a turn already started" : "") + (toolHint ? ", plus the agent's show_on_board request" : "") + ").");
   try {
     const result = await window.WhiteboardCore.planBoardStream({
-      apiKey: key, turns, notebook: board.notebook(), context: board.context(), hint: toolHint, handled: options.handled, signal: abort.signal, model: $("plannerModel").value,
+      apiKey: key, turns, notebook: board.notebook(), context: board.context(), hint: toolHint, handled: options.handled, partial: !!options.text && !options.handled, signal: abort.signal, model: $("plannerModel").value,
       onOps: (ops) => { if (stale()) return; if (ordered) ordered.push(ops); else deliver(ops); },
     });
     if (ordered) await ordered.whenReleased(); // anything held back for the first part is delivered now
     if (stale()) return;
     if (result.errors.length) boardEvent("planner", "warn", result.errors.length + " drawing step(s) were rejected: " + result.errors.slice(0, 3).join("; "));
     if (steps === 0){
-      if (!options.handled){
+      if (!options.handled && momentSeen && !toolHint){ // the planner chose, on purpose, not to draw: that is teaching, not a failure
+        setBadge(momentSeen === "wait" ? "Animated · waiting for the student" : "Animated · speaking only"); boardEvent("nothing", "info", "The teacher explains without drawing this turn (" + momentSeen.replace("_", " ") + ").");
+      } else if (!options.handled){
         if (toolHint || result.errors.length) fallbackToClassic(toolHint ? "Claude drew nothing for the agent's request" : "Claude's drawing steps could not be used");
         else { setBadge("Animated · nothing to draw"); boardEvent("nothing", "info", "Claude chose to draw nothing for this turn."); }
       }
@@ -450,7 +470,7 @@ async function start(isRetry){
           }
         } else if (wasSpeaking){
           clearTimeout(endTimer);
-          endTimer = setTimeout(() => { if (whiteboard) whiteboard.speechEnd(); turnOpen = false; }, 700);
+          endTimer = setTimeout(() => { if (whiteboard){ whiteboard.speechEnd(); reportSync(); } turnOpen = false; }, 700);
         }
         setMode(mode === "speaking" ? "speaking" : "listening");
       },
@@ -459,7 +479,7 @@ async function start(isRetry){
       // Fires as each piece of the teacher's voice actually plays, if the agent sends character timing.
       // When it does, drawing steps wait for the words they belong to. When it doesn't, drawing is paced by time.
       // WebSocket connections only: ElevenLabs does not send audio events (and so no alignment) over WebRTC.
-      onAudioAlignmentPlayback: (e) => { const a = e && e.alignment, chars = a && a.chars; if (whiteboard && Array.isArray(chars)) whiteboard.speechProgress(chars.join(""), a.char_start_times_ms); },
+      onAudioAlignmentPlayback: (e) => { const a = e && e.alignment, chars = a && a.chars; if (whiteboard && Array.isArray(chars)) whiteboard.speechProgress(chars.join(""), a.char_start_times_ms, e.event_id); },
       // The agent's reply as it is being written, before the voice has finished it. Only sent if "agent_chat_response_part"
       // is enabled in the agent's client events. The first complete sentence is enough to start the pen early.
       onAgentChatResponsePart: (part) => {

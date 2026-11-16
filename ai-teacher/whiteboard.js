@@ -13,11 +13,11 @@
  *    the queue is dropped, and what is already on the page stays.
  *  - Nothing from the AI is ever inserted as HTML.
  *
- * Needs whiteboard-core.js, whiteboard-hand.js and whiteboard-layout.js first.
+ * Needs whiteboard-core.js, whiteboard-hand.js, whiteboard-layout.js and whiteboard-diagram.js first.
  */
 (function (root) {
   "use strict";
-  const core = root.WhiteboardCore, hand = root.WhiteboardHand, Layout = root.WhiteboardLayout;
+  const core = root.WhiteboardCore, hand = root.WhiteboardHand, Layout = root.WhiteboardLayout, Diagram = root.WhiteboardDiagram;
   const SVG_NS = "http://www.w3.org/2000/svg";
   const { BOARD } = core;
   const MARGIN = Layout.DEFAULTS.margin;
@@ -72,6 +72,9 @@
     return ` M${num(a[0])} ${num(a[1])} L${num(tip[0])} ${num(tip[1])} L${num(b[0])} ${num(b[1])}`;
   }
   const polylineLength = (points) => hand.strokeLength(points);
+  const roundedRectPath = (x, y, w, h, r) => `M${num(x + r)} ${num(y)} H${num(x + w - r)} A${r} ${r} 0 0 1 ${num(x + w)} ${num(y + r)} V${num(y + h - r)} A${r} ${r} 0 0 1 ${num(x + w - r)} ${num(y + h)} H${num(x + r)} A${r} ${r} 0 0 1 ${num(x)} ${num(y + h - r)} V${num(y + r)} A${r} ${r} 0 0 1 ${num(x + r)} ${num(y)} Z`;
+  /** The outline of a diagram node (local coordinates): a curve for ellipses and circles, a rounded or square box otherwise. */
+  const nodePath = (n) => (n.shape === "ellipse" || n.shape === "circle" ? ellipsePath(n.x + n.w / 2, n.y + n.h / 2, n.w / 2, n.h / 2) : n.shape === "rounded" ? roundedRectPath(n.x, n.y, n.w, n.h, 12) : rectPath(n.x, n.y, n.w, n.h));
   const msFor = (length, speed) => Math.max(120, (length / speed) * 1000);
 
   /** The box a shape occupies in its own coordinates, with room for the stroke and an arrow's head. */
@@ -96,6 +99,8 @@
      * @param {() => number|null} [options.speechLeftMs] override: how long the teacher will keep talking
      * @param {(level:string, message:string) => void} [options.log] diagnostics sink
      * @param {(state:object) => void} [options.onNotebook] called whenever pages are added or the live/viewed page changes
+     * @param {(info:object) => void} [options.onMoment] called when the planner marks a teaching moment (speak only, wait, ...)
+     * @param {(info:object) => void} [options.onRef] called when a step that a spoken reference depended on is finished, with how late it was
      * @param {(info:object) => void} [options.onGate] called when a step with a cue is released, with the reason and wait
      * @param {boolean} [options.debugStrokeColors] colour every pen stroke differently, to see stroke order (tests)
      * @param {object} [options.clock] a core.SpeechClock (tests)
@@ -111,6 +116,8 @@
       this.clock = options.clock || new core.SpeechClock();
       this.onNotebook = options.onNotebook || (() => {});
       this.onGate = options.onGate || null;
+      this.onMoment = options.onMoment || null;
+      this.onRef = options.onRef || null;
       // Read live, so changing the system setting mid-lesson takes effect on the next stroke.
       const motionQuery = root.matchMedia ? root.matchMedia("(prefers-reduced-motion: reduce)") : null;
       this.prefersReducedMotion = () => (options.reducedMotion != null ? options.reducedMotion : !!(motionQuery && motionQuery.matches));
@@ -131,6 +138,11 @@
       this.scheduled = false; this.raf = 0; this.timer = 0;
       this.idleWaiters = [];
       this.gates = [];
+      this.waiting = false;          // the teacher asked the student something: nothing more is drawn until the student answers
+      this.moments = [];             // teaching moments the planner has marked, for diagnostics and tests
+      this.timeline = [];            // when each step was released, started and finished (ms on this.now()), for measuring sync
+      this.syncStats = { released: {}, refs: 0, lateRefs: 0, worstLateMs: 0 };
+      this.calcAnchors = new Map();  // calc name -> where the first line's "=" is, so later lines line up under it
       this.uid = 0;
       this.typesetCache = new Map();
       // Live counters, so tests and diagnostics can see that real strokes are being drawn.
@@ -152,14 +164,27 @@
     /** Add validated steps to the end of the queue. They are drawn one after another, never all at once. */
     enqueue(ops) {
       if (!ops || !ops.length) return;
-      for (const op of ops) this.queue.push({ op, generation: this.generation });
+      if (this.waiting) { // the teacher is waiting for the student's answer: do not draw on
+        const drawing = ops.filter((op) => op.op !== "moment");
+        if (drawing.length) this.log("info", `The teacher is waiting for the student: not drawing ${drawing.length} more step(s).`);
+        return;
+      }
+      for (const op of ops) for (const step of this.expand(op)) this.queue.push({ op: step, generation: this.generation });
       this.drain();
+    }
+    /** A diagram is drawn as a frame (laid out as a whole), then its parts one by one, each with its own cue. */
+    expand(op) {
+      if (op.op !== "diagram") return [op];
+      const steps = [{ op: "dframe", id: op.id, spec: op, cue: op.cue, ref: op.ref }];
+      for (const part of op.parts) steps.push({ op: part.type === "node" ? "dnode" : "dlink", diagram: op.id, part, id: part.id, cue: part.cue, ref: part.ref });
+      return steps;
     }
 
     /** The student interrupted: the pen finishes the stroke it is on, everything waiting is dropped, the drawing stays. */
     cancelPending() {
       this.generation++;
       this.queue.length = 0;
+      this.waiting = false; // an interruption is the student answering
       this.clock.end(this.now()); // the teacher stopped talking: nothing waits for a cue any more
       if (this.current) this.current.cancelled = true; // the element in progress stops instead of carrying on animating
       this.finishJobs(true);
@@ -169,7 +194,7 @@
     reset() {
       this.cancelPending();
       for (const page of this.pages) page.g.remove();
-      this.pages = []; this.items.clear(); this.followLive = true;
+      this.pages = []; this.items.clear(); this.calcAnchors.clear(); this.followLive = true;
       this.live = this.working = this.view = this.addPage("");
       this.showPage(this.view);
     }
@@ -182,13 +207,13 @@
     /* ----- Public API: the teacher's speech (see core.SpeechClock) ----- */
 
     /** A new spoken turn: forget the previous one. `text` is what the teacher is saying, if already known. */
-    beginTurn(text) { this.clock.reset(); if (text) this.clock.setText(text, this.now()); }
+    beginTurn(text) { this.clock.reset(); this.waiting = false; if (text) this.clock.setText(text, this.now()); }
     /** The teacher's text for this turn (it may arrive after the voice starts, or grow as it streams in). */
     setTurnText(text) { this.clock.setText(text, this.now()); }
     speechStart() { this.clock.start(this.now()); }
     speechEnd() { this.clock.end(this.now()); }
     /** A chunk of the teacher's voice began playing (ElevenLabs audio alignment): its text, and each character's start offset in ms if known. */
-    speechProgress(text, startsMs) { this.clock.aligned(String(text || ""), startsMs, this.now()); }
+    speechProgress(text, startsMs, eventId) { this.clock.aligned(String(text || ""), startsMs, this.now(), eventId); }
     /** How long the teacher will probably keep talking, in ms, or null when unknown. */
     speechLeftMs() {
       if (this.speechLeftOverride) return this.speechLeftOverride();
@@ -229,9 +254,10 @@
     }
     /** What the validator needs to know: every id, which are graphs, the size of each diagram group, the page ids. */
     context() {
-      const context = { ids: [], graphs: [], groups: {}, pages: this.pages.map((p) => p.id) };
+      const context = { ids: [], graphs: [], groups: {}, owners: {}, pages: this.pages.map((p) => p.id) };
       for (const item of this.items.values()) {
         context.ids.push(item.id);
+        if (item.parent) context.owners[item.id] = item.parent.id;
         if (item.type === "graph") context.graphs.push(item.id);
         if (item.type === "group") context.groups[item.id] = { w: item.frame.w, h: item.frame.h };
       }
@@ -302,14 +328,34 @@
           await this.waitForCue(entry);
           if (entry.generation !== this.generation) continue;
           this.current = { cancelled: false };
+          const startedAt = this.now();
           try { await this.run(entry.op, this.paceFor(entry)); } catch (error) { this.log("warn", "A drawing step failed: " + (error && error.message) + " " + JSON.stringify(entry.op).slice(0, 120)); }
           this.current = null;
+          if (entry.generation === this.generation) this.recordStep(entry.op, startedAt, this.now());
         }
       } finally {
         this.running = false; this.current = null;
         this.pencil.style.opacity = 0;
         for (const resolve of this.idleWaiters.splice(0)) resolve();
       }
+    }
+
+    /**
+     * Remember when a step ran, and, if the teacher's words REFER to what it drew ("look at the point"), measure how
+     * late it was: the number that says whether the picture was ready when the teacher pointed at it.
+     */
+    recordStep(op, startedAt, finishedAt) {
+      const record = { op: op.op, id: op.id, cue: op.cue, ref: op.ref, startedAt, finishedAt };
+      this.timeline.push(record); if (this.timeline.length > 200) this.timeline.shift();
+      if (!op.ref) return;
+      const spokenAt = this.clock.timeOf(op.ref);
+      if (spokenAt == null) return;
+      const late = Math.round(finishedAt - spokenAt);
+      this.syncStats.refs++;
+      record.refLateMs = late;
+      const info = { id: op.id, ref: op.ref, finishedAfterReferenceMs: late, late: late > 600 };
+      if (info.late) { this.syncStats.lateRefs++; this.syncStats.worstLateMs = Math.max(this.syncStats.worstLateMs, late); this.log("warn", `The teacher said "${op.ref}" but "${op.id || op.op}" was only finished ${late} ms later. (Planning or drawing took longer than the voice allowed.)`); }
+      if (this.onRef) this.onRef(info);
     }
 
     /**
@@ -332,16 +378,19 @@
      * releases it. Every release is reported through onGate with the reason, so timing can be checked.
      */
     async waitForCue(entry) {
-      const cue = entry.op.cue;
-      if (!cue) return;
+      const { cue, ref } = entry.op;
+      if (!cue && !ref) return;
       const started = this.now();
+      // A step the teacher will REFER to must be finished by then: it is released early by however long it takes to draw.
+      const refLeadMs = ref ? (this.naturalMs(entry.op) * this.paceFor(entry)) / this.timeScale + 300 : 0;
       for (;;) {
         if (entry.generation !== this.generation) return;
-        const result = this.clock.evaluate(cue, this.now());
+        const result = this.clock.evaluate(cue, this.now(), { ref, refLeadMs });
         if (result.ready) {
-          const info = { op: entry.op.op, id: entry.op.id, cue, reason: result.reason, waitedMs: Math.round(this.now() - started) };
+          const info = { op: entry.op.op, id: entry.op.id, cue: cue || ref, reason: result.reason, waitedMs: Math.round(this.now() - started) };
+          this.syncStats.released[result.reason] = (this.syncStats.released[result.reason] || 0) + 1;
           this.gates.push(info); if (this.gates.length > 100) this.gates.shift();
-          if (result.reason === "cue-not-found") this.log("warn", `The cue "${cue}" was not found in the teacher's words, so this step is drawn without waiting.`);
+          if (result.reason === "cue-not-found") this.log("warn", `The cue "${cue || ref}" was not found in the teacher's words, so this step is drawn without waiting.`);
           if (this.onGate) this.onGate(info);
           return;
         }
@@ -375,6 +424,10 @@
         case "point": return 500 + (op.label ? 500 : 0);
         case "shape": return msFor(this.shapeLength(op), op.shape === "curve" ? SPEED.curve : SPEED.line);
         case "group": return 100;
+        case "dframe": return 300 + (op.spec && op.spec.title ? 700 : 0);
+        case "dnode": return 900 + (op.part && op.part.label ? op.part.label.length * 45 : 0);
+        case "dlink": return 650 + (op.part && op.part.label ? op.part.label.length * 35 : 0);
+        case "moment": return 50;
         case "highlight": return 650;
         case "point_to": return 2200;
         case "erase": return 400;
@@ -407,6 +460,10 @@
         case "write": return this.runWrite(op, d);
         case "graph": return this.runGraph(op, d);
         case "group": return this.runGroup(op, d);
+        case "dframe": return this.runDFrame(op, d);
+        case "dnode": return this.runDNode(op, d);
+        case "dlink": return this.runDLink(op, d);
+        case "moment": return this.runMoment(op);
         case "plot": return this.runPlot(op, d);
         case "point": return this.runPoint(op, d);
         case "shape": return this.runShape(op, d);
@@ -491,6 +548,7 @@
       item.g.remove();
       item.page.ids.delete(id);
       item.page.layout.release(id);
+      for (const [name, anchor] of this.calcAnchors) if (anchor.itemId === id) this.calcAnchors.delete(name); // the line the equals signs were aligned to is gone
       if (item.parent) { item.parent.children.delete(id); if (item.parent.labels) item.parent.labels.release(id); } // a diagram label frees its place in the diagram
       this.items.delete(id);
     }
@@ -505,6 +563,10 @@
       const near = request.near && this.items.get(request.near) && this.items.get(request.near).page === page ? request.near : undefined;
       const wanted = { id, w, h, flow: request.flow || "stack", near, side: request.side, calc: request.calc, prefer: request.prefer, reserveH: request.reserveH };
       let spot = page.layout.place(wanted);
+      if (spot && request.alignTo != null) { // line this block up with an earlier one (the "=" signs of a calculation)
+        const alt = { x: Math.ceil(request.alignTo), y: spot.y };
+        if (alt.x !== spot.x && page.layout.isFree({ x: alt.x, y: alt.y, w, h }, request.calc, id)) spot = alt;
+      }
       if (!spot) {
         const full = page;
         page = this.addPage(""); this.working = page; this.setLive(page);
@@ -572,14 +634,17 @@
 
     /** Write a handful of short labels (graph numbers, axis names) as quick handwriting. */
     async writeLabels(parent, labels, color, offset, d, size) {
-      const strokes = [];
+      const strokes = [], rects = [];
       for (const label of labels) {
         const typeset = hand.typesetText(label.text, { size: label.size || size, seed: label.text });
         const dx = label.anchor === "end" ? -typeset.width : label.anchor === "middle" ? -typeset.width / 2 : 0;
-        strokes.push(...typeset.strokes.map((stroke) => stroke.map(([x, y]) => [x + label.x + dx, y + label.y - typeset.baseline])));
+        const top = label.top ? label.y : label.y - typeset.baseline; // label.y is the baseline unless `top` says it is the top edge
+        strokes.push(...typeset.strokes.map((stroke) => stroke.map(([x, y]) => [x + label.x + dx, y + top])));
+        rects.push({ x: label.x + dx, y: top, w: typeset.width, h: typeset.height });
       }
       if (!strokes.length) return null;
       const built = this.buildHand(parent, strokes, color, clamp(size * 0.09, 1.8, 3));
+      built.rects = rects;
       await this.playHand(built, d(built.timeline.total), offset, SPEED.labelBoost);
       return built;
     }
@@ -593,7 +658,11 @@
       const box = drawable ? { w: typeset.width, h: typeset.height } : this.estimateTextBox(op, typeset);
       if (op.size === "title") box.w = BOARD.width - 2 * MARGIN; // a title owns its whole row: nothing is placed beside it
       const firstOfCalc = op.calc && ![...this.live.ids].some((id) => { const i = this.items.get(id); return i && i.calc === op.calc; });
-      const spot = this.reserve(op.id, box.w, box.h, { flow: "stack", near: op.near, side: op.side, calc: op.calc, reserveH: firstOfCalc ? CALC_RESERVE : 0, prefer: op.prefer, page: op.page });
+      const aligns = op.calc && op.kind === "math" && typeset.relationX != null;
+      const anchor = aligns ? this.calcAnchors.get(op.calc) : null;
+      const targetPage = op.page || this.live; // a correction goes back to the page it is on, not to where the teacher is
+      const spot = this.reserve(op.id, box.w, box.h, { flow: "stack", near: op.near, side: op.side, calc: op.calc, reserveH: firstOfCalc ? CALC_RESERVE : 0, prefer: op.prefer, page: op.page, alignTo: anchor && anchor.pageId === targetPage.id ? anchor.x - typeset.relationX : null });
+      if (aligns && (!anchor || anchor.pageId !== spot.page.id)) this.calcAnchors.set(op.calc, { pageId: spot.page.id, x: spot.x + typeset.relationX, itemId: op.id });
       if (!drawable) return this.runWriteFallback(op, d, typeset, spot);
 
       const item = this.createItem(op.id, op.kind === "math" ? "math" : "text", spot.page);
@@ -807,11 +876,13 @@
       const labels = [];
       for (const v of xTicks) if (!(Math.abs(v) < 1e-9 && axisX !== margin.l)) labels.push({ text: String(v), x: sx(v), y: axisY + 28, anchor: "middle" });
       for (const v of yTicks) if (!(Math.abs(v) < 1e-9 && axisY !== margin.t + plotH)) labels.push({ text: String(v), x: axisX - 12, y: sy(v) + 8, anchor: "end" });
-      await this.writeLabels(item.g, labels, "currentColor", offset, d, 22);
+      const tickLabels = await this.writeLabels(item.g, labels, "currentColor", offset, d, 22);
       const axisLabels = [];
       if (op.xlabel) axisLabels.push({ text: op.xlabel, x: margin.l + plotW - 4, y: axisY - 12, anchor: "end" });
       if (op.ylabel) axisLabels.push({ text: op.ylabel, x: axisX + 12, y: margin.t + 14, anchor: "start" });
-      await this.writeLabels(item.g, axisLabels, "currentColor", offset, d, 28);
+      const nameLabels = await this.writeLabels(item.g, axisLabels, "currentColor", offset, d, 28);
+      // What a curve or point label must stay clear of: the axes, the numbers, the axis names, and (as they are drawn) the curves.
+      item.graph.obstacles = { rects: [{ x: margin.l - 6, y: axisY - 5, w: plotW + 10, h: 10 }, { x: axisX - 5, y: margin.t - 4, w: 10, h: plotH + 10 }, ...(tickLabels ? tickLabels.rects : []), ...(nameLabels ? nameLabels.rects : [])], lines: [] };
       item.text = [op.xlabel, op.ylabel].filter(Boolean).join(" vs ");
       this.describe();
     }
@@ -832,12 +903,13 @@
       const from = Math.max(graph.xmin, op.from == null ? graph.xmin : op.from), to = Math.min(graph.xmax, op.to == null ? graph.xmax : op.to);
       if (!(to > from)) return;
       const rangeY = graph.ymax - graph.ymin, samples = Math.max(120, Math.round(plotW / 2));
-      let pathData = "", previous = null, last = null, labelPoint = null;
+      let pathData = "", previous = null, last = null, labelPoint = null; const runs = []; let run = null;
       for (let i = 0; i <= samples; i++) {
         const x = from + ((to - from) * i) / samples, y = evaluate(x);
         const usable = Number.isFinite(y) && y > graph.ymin - rangeY * 3 && y < graph.ymax + rangeY * 3;
-        if (!usable || (previous !== null && Math.abs(y - previous) > rangeY * 2)) { previous = usable ? y : null; if (usable) pathData += ` M${num(sx(x))} ${num(sy(y))}`; continue; } // break the line at gaps like tan(x)
+        if (!usable || (previous !== null && Math.abs(y - previous) > rangeY * 2)) { previous = usable ? y : null; run = null; if (usable) { pathData += ` M${num(sx(x))} ${num(sy(y))}`; run = [[sx(x), sy(y)]]; runs.push(run); } continue; } // break the line at gaps like tan(x)
         pathData += (previous === null ? " M" : " L") + num(sx(x)) + " " + num(sy(y));
+        if (!run) { run = []; runs.push(run); } run.push([sx(x), sy(y)]);
         previous = y; last = { x, y };
         if (sy(y) >= margin.t + 28) labelPoint = { x, y }; // where the label can sit beside the curve without leaving the plot
       }
@@ -850,11 +922,15 @@
       item.text = "";
       const offset = { x: graphItem.bbox.x, y: graphItem.bbox.y };
       await this.drawPath(path, d(msFor(plotW * 1.4, SPEED.curve)), offset);
+      const obstacles = graphItem.graph.obstacles || (graphItem.graph.obstacles = { rects: [], lines: [] });
+      obstacles.lines.push(...runs.filter((r) => r.length > 1));
       if (op.label && labelPoint) {
-        // Beside the curve, but never across the y axis or its letter.
-        const labelWidth = hand.typesetText(op.label, { size: 26 }).width;
-        const right = clamp(sx(labelPoint.x) - 14, axisX + 18 + labelWidth, margin.l + plotW);
-        await this.writeLabels(item.g, [{ text: op.label, x: right, y: clamp(sy(labelPoint.y) + 6, margin.t + 30, margin.t + plotH), anchor: "end" }], colorVar(op.color), offset, d, 26);
+        // Beside the curve on a free side: never on a curve, an axis, a number or another label.
+        const size = hand.typesetText(op.label, { size: 26 });
+        const spot = Diagram.placeLabel([sx(labelPoint.x), sy(labelPoint.y)], { w: size.width, h: size.height }, { rects: obstacles.rects, lines: obstacles.lines }, { x: margin.l, y: margin.t, w: plotW, h: plotH }, { gap: 12 });
+        if (!spot.ok) this.log("info", `The label "${op.label}" has no completely free place beside its curve; placed where it overlaps least.`);
+        const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start" }], colorVar(op.color), offset, d, 26);
+        if (written) obstacles.rects.push(...written.rects);
       }
     }
 
@@ -868,7 +944,114 @@
       const dot = svgEl("circle", { cx: num(cx), cy: num(cy), r: 0, fill: colorVar(op.color) }, item.g);
       this.movePencil(offset.x + cx, offset.y + cy, true);
       await this.tween(d(300), (p) => { dot.setAttribute("r", num(7 * p)); });
-      if (op.label) await this.writeLabels(item.g, [{ text: op.label, x: cx + 14, y: cy - 12, anchor: "start" }], colorVar(op.color), offset, d, 26);
+      if (op.label) {
+        const size = hand.typesetText(op.label, { size: 26 }), obstacles = graphItem.graph.obstacles || (graphItem.graph.obstacles = { rects: [], lines: [] });
+        const dotRect = { x: cx - 9, y: cy - 9, w: 18, h: 18 };
+        const spot = Diagram.placeLabel([cx, cy], { w: size.width, h: size.height }, { rects: [...obstacles.rects, dotRect], lines: obstacles.lines }, { x: 2, y: 2, w: graphItem.bbox.w - 4, h: graphItem.bbox.h - 4 }, { gap: 12 });
+        const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start" }], colorVar(op.color), offset, d, 26);
+        if (written) obstacles.rects.push(...written.rects);
+      }
+    }
+
+    /* ----- Teaching moments ----- */
+
+    /**
+     * The planner's note on what kind of moment this is: speaking only, writing, drawing, pointing, or waiting for the
+     * student. "wait" is a barrier: the teacher has asked something, so nothing more is drawn until the student answers.
+     */
+    async runMoment(op) {
+      this.moments.push({ kind: op.kind, note: op.note || "", at: this.now() });
+      if (this.onMoment) this.onMoment({ kind: op.kind, note: op.note || "" });
+      if (op.kind === "wait") { this.waiting = true; const dropped = this.queue.filter((e) => e.generation === this.generation).length; this.queue.length = 0; if (dropped) this.log("info", `The teacher asked a question: ${dropped} queued step(s) after it were dropped.`); }
+    }
+
+    /* ----- Diagrams: nodes and links laid out as a whole, drawn part by part ----- */
+
+    /** Lay out the whole diagram (sizes, cells, connector routes, label places), reserve its space, and write its title. */
+    async runDFrame(op, d) {
+      const spec = op.spec;
+      if (this.items.has(spec.id)) this.removeItem(spec.id);
+      const nodes = spec.parts.filter((p) => p.type === "node").map((p) => ({ id: p.id, label: p.label, shape: p.shape, in: p.in }));
+      const links = spec.parts.filter((p) => p.type === "link").map((p) => ({ id: p.id, from: p.from, to: p.to, label: p.label, style: p.style }));
+      const measure = (text, o) => { const t = hand.typesetText(text, { size: o.size, maxWidth: o.maxWidth, seed: text }); return { w: t.width, h: t.height }; };
+      const page = { maxW: BOARD.width - 2 * MARGIN, maxH: BOARD.height - 2 * MARGIN };
+      let keptNodes = nodes, keptLinks = links; const dropped = [];
+      const arrange = () => Diagram.layoutDiagram({ title: spec.title, layout: spec.layout, cols: spec.cols, nodes: keptNodes, links: keptLinks }, measure, page);
+      let layout = arrange();
+      // Nothing may leave the page, and nothing is shrunk: if even the most compact arrangement is too big, leave out the last nodes.
+      while (!layout.fits && keptNodes.filter((n) => !n.in).length > 2) {
+        const last = [...keptNodes].reverse().find((n) => !n.in), gone = new Set([last.id, ...keptNodes.filter((n) => n.in === last.id).map((n) => n.id)]);
+        keptNodes = keptNodes.filter((n) => !gone.has(n.id)); keptLinks = keptLinks.filter((l) => !gone.has(l.from) && !gone.has(l.to)); dropped.push(...gone);
+        layout = arrange();
+      }
+      if (layout.arranged) this.log("info", `Diagram "${spec.id}" would not fit a page as asked, so it was arranged ${layout.arranged}.`);
+      if (dropped.length) this.log("warn", `Diagram "${spec.id}" was too big for one page: left out ${dropped.join(", ")}. Use fewer nodes, shorter labels, or two diagrams.`);
+      if (layout.warnings.length) this.log("warn", `Diagram "${spec.id}": ${layout.warnings.join("; ")}`);
+      const spot = this.reserve(spec.id, layout.w, layout.h, { flow: "any", near: spec.near, side: spec.side, calc: spec.calc });
+      const item = this.createItem(spec.id, "diagram", spot.page);
+      item.g.setAttribute("transform", `translate(${num(spot.x)} ${num(spot.y)})`);
+      item.frame = { x: spot.x, y: spot.y, w: spot.w, h: spot.h };
+      item.bbox = { ...item.frame }; item.layout = layout; item.text = spec.title || "";
+      this.emit();
+      if (spec.title && layout.title) {
+        const t = hand.typesetText(spec.title, { size: Diagram.TITLE_SIZE, maxWidth: layout.w, seed: spec.title });
+        const built = this.buildHand(item.g, t.strokes.map((s) => s.map(([x, y]) => [x + layout.title.x, y + layout.title.y])), colorVar("ink"), clamp(Diagram.TITLE_SIZE * 0.082, 2.4, 4.4));
+        this.stats.handwritten++;
+        await this.playHand(built, d(built.timeline.total), { x: spot.x, y: spot.y });
+      } else await this.tween(d(120), () => {});
+    }
+
+    /** One node: its outline is drawn, then its label is written inside, centred with padding. */
+    async runDNode(op, d) {
+      const diagram = this.items.get(op.diagram);
+      if (!diagram || !diagram.layout) return;
+      const L = diagram.layout.nodes.get(op.part.id);
+      if (!L) return;
+      if (this.items.has(op.part.id)) this.removeItem(op.part.id);
+      const item = this.createItem(op.part.id, "node", diagram.page, diagram);
+      const offset = { x: diagram.frame.x, y: diagram.frame.y };
+      item.bbox = { x: offset.x + L.x, y: offset.y + L.y, w: L.w, h: L.h };
+      item.text = L.label;
+      this.emit();
+      const color = colorVar(op.part.color);
+      if (L.shape !== "none") {
+        const path = svgEl("path", { d: nodePath(L), fill: "none", stroke: color, "stroke-width": STROKE, "stroke-linecap": "round", "stroke-linejoin": "round" }, item.g);
+        await this.drawPath(path, d(msFor(2 * (L.w + L.h), SPEED.line)), offset);
+      }
+      if (L.label) {
+        const t = hand.typesetText(L.label, { size: Diagram.LABEL_SIZE, maxWidth: Diagram.DEFAULTS.labelMaxWidth, seed: L.label });
+        const built = this.buildHand(item.g, t.strokes.map((s) => s.map(([x, y]) => [x + L.labelBox.x, y + L.labelBox.y])), color, clamp(Diagram.LABEL_SIZE * 0.085, 2.2, 3.6));
+        this.stats.handwritten++;
+        await this.playHand(built, d(built.timeline.total), offset);
+      }
+    }
+
+    /** One connector, drawn along its planned route (never across a node or a label), then its label beside it. */
+    async runDLink(op, d) {
+      const diagram = this.items.get(op.diagram);
+      if (!diagram || !diagram.layout) return;
+      const R = diagram.layout.links.find((l) => l.id === op.part.id);
+      if (!R) return;
+      if (this.items.has(op.part.id)) this.removeItem(op.part.id);
+      const item = this.createItem(op.part.id, "link", diagram.page, diagram);
+      const offset = { x: diagram.frame.x, y: diagram.frame.y }, xs = R.points.map((p) => p[0]), ys = R.points.map((p) => p[1]);
+      item.bbox = { x: offset.x + Math.min(...xs), y: offset.y + Math.min(...ys), w: Math.max(...xs) - Math.min(...xs) || 1, h: Math.max(...ys) - Math.min(...ys) || 1 };
+      item.text = op.part.label || "";
+      this.emit();
+      const color = colorVar(op.part.color), arrow = R.style !== "line";
+      const pts = R.points;
+      let pathData = linePath(pts, false);
+      if (arrow && pts.length >= 2) pathData += arrowHead(pts[pts.length - 2], pts[pts.length - 1], 16);
+      const path = svgEl("path", { d: pathData, fill: "none", stroke: color, "stroke-width": 3.5, "stroke-linecap": "round", "stroke-linejoin": "round" }, item.g);
+      const ms = d(msFor(polylineLength(pts) + (arrow ? 32 : 0), SPEED.line));
+      if (R.style === "dashed") { path.setAttribute("stroke-dasharray", "10 9"); await this.revealPath(path, { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs) || 1, h: Math.max(...ys) - Math.min(...ys) || 1 }, ms, offset); }
+      else await this.drawPath(path, ms, offset);
+      if (R.label && R.labelBox) {
+        const t = hand.typesetText(R.label, { size: Diagram.LABEL_SIZE - 4, maxWidth: Diagram.LINK_LABEL_WIDTH, seed: R.label });
+        const built = this.buildHand(item.g, t.strokes.map((s) => s.map(([x, y]) => [x + R.labelBox.x, y + R.labelBox.y])), color, 2.4);
+        this.stats.handwritten++;
+        await this.playHand(built, d(built.timeline.total), offset, SPEED.labelBoost);
+      }
     }
 
     /* ----- Highlight, point, erase, correct, pages ----- */
@@ -876,7 +1059,7 @@
     async runHighlight(op, d) {
       const item = this.items.get(op.target);
       if (!item || !item.bbox) return;
-      if (["text", "math", "graph", "group"].includes(item.type)) {
+      if (["text", "math", "graph", "group", "diagram", "node"].includes(item.type)) {
         if (item.marker) item.marker.remove();
         const pad = 8, b = item.bbox, top = item.parent || item;
         const marker = svgEl("rect", { x: b.x - pad, y: b.y - pad / 2, width: 0, height: b.h + pad, rx: 8, fill: colorVar(op.color), style: "opacity:.3;pointer-events:none" });

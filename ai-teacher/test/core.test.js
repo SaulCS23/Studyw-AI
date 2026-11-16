@@ -43,6 +43,7 @@ function validateLesson(lesson) {
       if (op.id) context.ids.push(op.id);
       if (op.op === "graph") context.graphs.push(op.id);
       if (op.op === "group") context.groups[op.id] = { w: op.w, h: op.h };
+      if (op.op === "diagram") for (const part of op.parts) context.ids.push(part.id);
       if (op.op === "new_page") context.pages.push("p" + (context.pages.length + 1));
     }
     allOps.push(...ops);
@@ -51,14 +52,16 @@ function validateLesson(lesson) {
 }
 
 test("fixtures: every simulated lesson validates with no errors, across turns", () => {
-  for (const lesson of [...fixtures.all, fixtures.sentences, fixtures.longLesson(12)]) validateLesson(lesson);
+  for (const lesson of [...fixtures.all, fixtures.sentences, fixtures.longLesson(12), fixtures.speakOnly, fixtures.writeWhileSaying, fixtures.question, fixtures.questionAfterDrawing, fixtures.longDiagrams(8)]) validateLesson(lesson);
 });
 
 test("fixtures: every cue really occurs in the teacher's words for its turn (so it can be matched)", () => {
-  for (const lesson of [...fixtures.all, fixtures.revisit, fixtures.sentences, fixtures.longLesson(12)]) {
+  for (const lesson of [...fixtures.all, fixtures.revisit, fixtures.sentences, fixtures.longLesson(12), fixtures.speakOnly, fixtures.writeWhileSaying, fixtures.graphWithReference, fixtures.pointAndExplain, fixtures.question, fixtures.questionAfterDrawing, fixtures.longDiagrams(8)]) {
     for (const turn of lesson.turns) for (const op of turn.ops) {
-      if (!op.cue) continue;
-      assert.ok(core.locateCue(turn.teacher, op.cue), `${lesson.subject}: cue "${op.cue}" is not in "${turn.teacher}"`);
+      for (const phrase of [op.cue, op.ref, ...(op.parts || []).flatMap((part) => [part.cue, part.ref])]) {
+        if (!phrase) continue;
+        assert.ok(core.locateCue(turn.teacher, phrase), `${lesson.subject}: "${phrase}" is not in "${turn.teacher}"`);
+      }
     }
   }
 });
@@ -434,11 +437,12 @@ test("planner: if streaming is unavailable the whole answer is still understood"
   assert.deepEqual(result.ops.map((o) => o.content), ["Hi", "There"]);
 });
 
-test("planner prompt: small cue-tied steps, no positions, pages, and every action documented", () => {
+test("planner prompt: teaching moments, cues, references, diagrams as nodes and links, pages, and every action documented", () => {
   const prompt = core.PLANNER_SYSTEM;
-  for (const word of ["pen", "JSON", "cue", "SMALL", "never draw anything the teacher has not said yet".replace("never draw", "never draw"), "new_page", "go_to_page", "point_to", '"op":"group"', "calc", "near", "You never choose positions"]) assert.ok(prompt.includes(word), "mentions " + word);
-  for (const op of ["write", "graph", "plot", "point", "shape", "highlight", "erase", "correct", "pause"]) assert.ok(prompt.includes('"op":"' + op + '"'), "documents " + op);
-  assert.ok(prompt.length < 6000, "prompt stays small: " + prompt.length);
+  for (const word of ["pen", "JSON", "speak only", "wait", "NEVER its answer", "cue", "ref", "Never let the teacher refer to something your steps do not draw", "new_page", "go_to_page", "point_to", '"op":"diagram"', "calc", "near", "You never choose positions or sizes", "SMALL"]) assert.ok(prompt.includes(word), "mentions " + word);
+  for (const op of ["write", "graph", "plot", "point", "diagram", "highlight", "erase", "correct", "pause", "moment"]) assert.ok(prompt.includes('"op":"' + op + '"'), "documents " + op);
+  assert.ok(!prompt.includes('"op":"group"') && !prompt.includes("coordinates inside"), "raw coordinate groups are no longer taught");
+  assert.ok(prompt.length < 6500, "prompt stays small: " + prompt.length);
 });
 
 /* ---------- speech pacing helpers ---------- */
@@ -495,4 +499,155 @@ test("ordered delivery: once the student has interrupted, nothing is delivered (
   const ordered = core.createOrderedDelivery(first, (ops) => delivered.push(ops[0].id), () => stale);
   ordered.push([{ id: "e1" }]); stale = true; release(); await ordered.whenReleased(); ordered.push([{ id: "e2" }]);
   assert.deepEqual(delivered, []);
+});
+
+/* ---------- teaching moments, diagrams and references ---------- */
+
+test("moment: the five teaching moments are accepted, anything else is rejected", () => {
+  const { ops, errors } = core.validatePlan({ ops: ["speak_only", "write", "draw", "point", "wait"].map((kind) => ({ op: "moment", kind, note: "x" })).concat([{ op: "moment", kind: "dance" }]) });
+  assert.deepEqual(ops.map((o) => o.kind), ["speak_only", "write", "draw", "point", "wait"]);
+  assert.equal(errors.length, 1);
+});
+
+test("ref: the words where the teacher refers to a step are kept next to its cue", () => {
+  const { ops } = core.validatePlan({ ops: [{ op: "write", content: "x", cue: "the vertex", ref: "look at the vertex" }, { op: "write", content: "y", ref: "z".repeat(200) }] });
+  assert.equal(ops[0].ref, "look at the vertex"); assert.equal(ops[0].cue, "the vertex");
+  assert.ok(ops[1].ref.length <= core.LIMITS.cueLength);
+});
+
+test("diagram: nodes and links are validated, containers come before their children, and node ids can be pointed at", () => {
+  const { ops, errors } = core.validatePlan({ ops: [{ op: "diagram", id: "d", title: "T", layout: "cycle", parts: [
+    { node: "kid", label: "Nucleus", in: "box" }, { node: "box", label: "Cell", shape: "ellipse" }, { node: "out", label: "Wall", shape: "triangle" },
+    { from: "box", to: "out", label: "protects", style: "arrow" }, { from: "box", to: "ghost" }, { from: "kid", to: "kid" },
+    { node: "empty", label: "" }, { node: "kid", label: "duplicate" },
+  ] }, { op: "highlight", target: "kid" }, { op: "point_to", target: "d-l1" }] });
+  assert.equal(ops.length, 3, "the later highlight and point_to can name the diagram's nodes and links: " + errors.join(" | "));
+  const d = ops[0];
+  assert.equal(d.layout, "cycle");
+  assert.deepEqual(d.parts.filter((p) => p.type === "node").map((p) => p.id), ["box", "kid", "out"], "container first, then what is inside it");
+  assert.equal(d.parts.find((p) => p.id === "out").shape, "rounded", "an unknown shape becomes the default");
+  assert.deepEqual(d.parts.filter((p) => p.type === "link").map((p) => p.id), ["d-l1"]);
+  assert.ok(errors.some((e) => e.includes("not nodes of this diagram")) && errors.some((e) => e.includes("no label")) && errors.some((e) => e.includes("repeated")), errors.join(" | "));
+});
+
+test("diagram: a diagram without nodes, with too many nodes, or without parts is handled", () => {
+  assert.equal(core.validatePlan({ ops: [{ op: "diagram", id: "d", parts: [{ from: "a", to: "b" }] }] }).ops.length, 0);
+  assert.equal(core.validatePlan({ ops: [{ op: "diagram", id: "d" }] }).ops.length, 0);
+  const many = Array.from({ length: 20 }, (_, i) => ({ node: "n" + i, label: "N" + i }));
+  const { ops, errors } = core.validatePlan({ ops: [{ op: "diagram", id: "d", parts: many }] });
+  assert.equal(ops[0].parts.filter((p) => p.type === "node").length, core.LIMITS.diagramNodes);
+  assert.ok(errors.some((e) => e.includes("too many nodes")));
+});
+
+test("references: visual references and questions in the teacher's words are found", () => {
+  assert.ok(core.findReferences("Let's draw it. Now look at the vertex, right here at the bottom.").some((r) => r.toLowerCase().startsWith("look at the vertex")));
+  assert.ok(core.findReferences("Look at the point I just drew. It is the vertex.").some((r) => r.toLowerCase().includes("look at the point")));
+  assert.ok(core.findReferences("As you can see, the curve rises.").includes("As you can see"));
+  assert.ok(core.findReferences("Notice this point here.").length >= 1);
+  assert.deepEqual(core.findReferences("Photosynthesis makes sugar from light. It is wonderful."), [], "ordinary explanation has no visual reference");
+  assert.ok(core.findReferences("A. ".repeat(50) + "look at the first thing. look at the second thing. look at the third thing. look at the fourth thing. look at the fifth thing.").length <= 4, "at most four");
+  assert.equal(core.endsWithQuestion("What happens when x is zero?"), true);
+  assert.equal(core.endsWithQuestion("Here is a line. What is y when x is three?"), true);
+  assert.equal(core.endsWithQuestion("Does it cross? Yes, at two."), false, "only the last sentence counts");
+  assert.equal(core.endsWithQuestion("Great."), false);
+});
+
+test("planner message: references and questions are put in front of the planner", () => {
+  const nb = { live: "p1", pages: [{ id: "p1", title: "", free: 1, items: [] }] };
+  const ref = core.buildPlannerMessage([{ role: "teacher", text: "Look at the vertex right here." }], nb);
+  assert.ok(ref.includes("Visual references") && ref.includes("Look at the vertex"), ref);
+  const q = core.buildPlannerMessage([{ role: "teacher", text: "Here is a line. What is y when x is three?" }], nb);
+  assert.ok(q.includes("ends with a question") && q.includes("never the answer") && q.includes("wait moment"));
+  const plain = core.buildPlannerMessage([{ role: "teacher", text: "Plants make sugar." }], nb);
+  assert.ok(!plain.includes("Visual references") && !plain.includes("ends with a question"));
+});
+
+test("clock + reference: a step the teacher will refer to is released EARLY, by however long it takes to draw", () => {
+  const clock = new core.SpeechClock({ leadMs: 0 });
+  const text = "Let's draw the parabola. Look at the vertex right here.";
+  clock.setText(text, 0); clock.start(0);
+  const refAt = clock.estimateMs("Let's draw the parabola. ");      // when "Look at the vertex" starts
+  const drawMs = 1500;
+  assert.equal(clock.evaluate(undefined, refAt - drawMs - 50, { ref: "Look at the vertex", refLeadMs: drawMs }).ready, false, "too early: it would be drawn long before it is mentioned");
+  const released = clock.evaluate(undefined, refAt - drawMs + 10, { ref: "Look at the vertex", refLeadMs: drawMs });
+  assert.deepEqual([released.ready, released.reason], [true, "ref:estimate"], "released exactly one drawing-time before the reference");
+  assert.equal(clock.evaluate("right here", refAt - drawMs, {}).ready, false, "the cue alone would be later");
+  // with a cue as well, the EARLIER of the two moments wins
+  const both = clock.evaluate("right here", refAt - drawMs + 10, { ref: "Look at the vertex", refLeadMs: drawMs });
+  assert.equal(both.ready, true);
+});
+
+test("clock + reference: if the reference phrase is not in the text, the cue alone decides", () => {
+  const clock = new core.SpeechClock({ leadMs: 0 }); clock.setText("First we draw. Then we label it.", 0); clock.start(0);
+  assert.equal(clock.evaluate("Then we label", 0, { ref: "something nobody said", refLeadMs: 1000 }).ready, false);
+  assert.equal(clock.evaluate(undefined, 0, { ref: "something nobody said", refLeadMs: 1000 }).reason, "cue-not-found");
+});
+
+test("clock: timeOf says when a phrase is spoken (exact from alignment, estimated otherwise)", () => {
+  const clock = new core.SpeechClock({ leadMs: 0 }); clock.setText("one two three four five six", 0); clock.start(1000);
+  assert.equal(clock.timeOf("four five"), 1000 + clock.estimateMs("one two three "));
+  assert.equal(clock.timeOf("nothing here"), null);
+  const chars = Array.from("one two three four five six"); clock.aligned(chars.join(""), chars.map((_, i) => i * 50), 5000);
+  assert.equal(clock.timeOf("four five"), 5000 + 14 * 50, "aligned: the exact moment the phrase starts");
+});
+
+test("clock: audio chunks that arrive OUT OF ORDER are put back in order by event id", () => {
+  const clock = new core.SpeechClock({ leadMs: 0 }); clock.setText("First we look at the triangle. Then we mark the right angle.", 0); clock.start(0);
+  clock.aligned("Then we mark the right angle.", null, 3000, 2);   // chunk 2 arrives first
+  clock.aligned("First we look at the triangle. ", null, 3100, 1);  // chunk 1 arrives late
+  assert.equal(clock.chars.join(""), "First we look at the triangle. Then we mark the right angle.", "the spoken text is in speaking order");
+  assert.equal(clock.evaluate("mark the right angle", 3000).reason, "aligned");
+  const noIds = new core.SpeechClock(); noIds.aligned("b ", null, 1); noIds.aligned("a ", null, 2);
+  assert.equal(noIds.chars.join(""), "b a ", "without ids, arrival order is kept");
+});
+
+test("clock: a chunk that never arrives (a gap in the speech) falls back to the estimate for what was in it", () => {
+  const clock = new core.SpeechClock({ leadMs: 0 }); clock.setText("First we look. Then the lost words. Finally we finish here.", 0); clock.start(0);
+  clock.aligned("First we look. ", null, 100, 1); clock.aligned("Finally we finish here.", null, 4000, 3); // chunk 2 is missing
+  assert.equal(clock.evaluate("the lost words", 3000).ready, false, "its words are not in the speech that arrived: wait for the estimate plus grace");
+  assert.equal(clock.evaluate("the lost words", clock.estimateMs("First we look. Then ") + clock.graceMs + 5).ready, true, "and it is released then");
+  assert.equal(clock.evaluate("Finally we finish", 4000).reason, "aligned");
+});
+
+/* ---------- review findings: ids, containers, links, early plans ---------- */
+
+test("diagram ids: a node can never take over the id of another element or diagram (drawing it would delete that element)", () => {
+  const first = core.validatePlan({ ops: [{ op: "diagram", id: "d1", parts: [{ node: "sun", label: "Sun" }, { node: "sea", label: "Sea" }, { from: "sun", to: "sea" }] }] });
+  const second = core.validatePlan({ ops: [{ op: "write", content: "x", id: "note" }, { op: "diagram", id: "d2", parts: [{ node: "sun", label: "Sun again" }, { node: "note", label: "Note" }, { node: "d2", label: "Self" }, { from: "sun", to: "note" }] }] }, { ids: ["d1", "sun", "sea", "d1-l1"], owners: { sun: "d1", sea: "d1", "d1-l1": "d1" } });
+  const d2 = second.ops.find((o) => o.op === "diagram"), ids = d2.parts.filter((p) => p.type === "node").map((p) => p.id);
+  assert.ok(!ids.includes("sun") && !ids.includes("note") && !ids.includes("d2"), "renamed: " + ids);
+  assert.equal(new Set([...ids, "d1", "sun", "sea", "note"]).size, ids.length + 4, "every id is new");
+  const link = d2.parts.find((p) => p.type === "link");
+  assert.deepEqual([link.from, link.to], [ids[0], ids[1]], "the link follows the renamed nodes");
+  assert.ok(second.errors.some((e) => e.includes("already used by something else")));
+  assert.equal(first.errors.length, 0);
+});
+
+test("diagram ids: replacing the SAME diagram keeps its own node ids", () => {
+  const { ops, errors } = core.validatePlan({ ops: [{ op: "diagram", id: "d1", parts: [{ node: "sun", label: "Sun" }, { node: "sea", label: "Sea" }] }] }, { ids: ["d1", "sun", "sea"], owners: { sun: "d1", sea: "d1" } });
+  assert.deepEqual(ops[0].parts.map((p) => p.id), ["sun", "sea"]);
+  assert.deepEqual(errors, []);
+});
+
+test("diagram containers: a chain of three is ordered outermost first, and a loop of containers is broken instead of vanishing", () => {
+  const chain = core.validatePlan({ ops: [{ op: "diagram", id: "d", parts: [{ node: "a", label: "A", in: "b" }, { node: "b", label: "B", in: "c" }, { node: "c", label: "C" }] }] }).ops[0];
+  assert.deepEqual(chain.parts.map((p) => p.id), ["c", "b", "a"]);
+  const loop = core.validatePlan({ ops: [{ op: "diagram", id: "d", parts: [{ node: "a", label: "A", in: "b" }, { node: "b", label: "B", in: "a" }] }] });
+  assert.equal(loop.ops.length, 1);
+  assert.equal(loop.ops[0].parts.filter((p) => !p.in).length >= 1, true, "at least one is top level, so both can be drawn");
+  assert.ok(loop.errors.some((e) => e.includes("cannot contain each other")));
+});
+
+test("diagram links: a link whose node was dropped (no label) is dropped too and cannot be pointed at", () => {
+  const { ops, errors } = core.validatePlan({ ops: [{ op: "diagram", id: "d", parts: [{ from: "a", to: "b" }, { node: "a", label: "A" }, { node: "b", label: "" }, { node: "c", label: "C" }] }, { op: "point_to", target: "d-l1" }] });
+  assert.equal(ops.length, 1, errors.join(" | "));
+  assert.deepEqual(ops[0].parts.map((p) => p.id), ["a", "c"]);
+});
+
+test("early plan: a question in the first sentence is not treated as the end of the turn", () => {
+  const nb = { live: "p1", pages: [{ id: "p1", title: "", free: 1, items: [] }] };
+  const turns = [{ role: "teacher", text: "Where will it land? It follows a curve." }];
+  assert.ok(core.buildPlannerMessage([{ role: "teacher", text: "Where will it land?" }], nb).includes("ends with a question"), "a finished turn that ends with a question says so");
+  assert.ok(!core.buildPlannerMessage([{ role: "teacher", text: "Where will it land?" }], nb, "", null, true).includes("ends with a question"), "but an early plan (partial turn) does not");
+  assert.ok(!core.buildPlannerMessage(turns, nb).includes("ends with a question"), "the full turn does not end with a question");
 });

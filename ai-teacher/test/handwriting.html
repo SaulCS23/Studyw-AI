@@ -60,6 +60,7 @@ label{display:inline-flex;gap:6px;align-items:center;color:var(--muted)}
 <script src="../whiteboard-font.js"></script>
 <script src="../whiteboard-hand.js"></script>
 <script src="../whiteboard-layout.js"></script>
+<script src="../whiteboard-diagram.js"></script>
 <script src="../whiteboard-core.js"></script>
 <script src="../whiteboard.js"></script>
 <script src="fixtures.js"></script>
@@ -84,7 +85,7 @@ $("colors").onchange = () => { wb.debugStrokeColors = $("colors").checked; };
 function play(board, turn) {
   const { ops, errors } = core.validatePlan({ ops: turn.ops }, board.context());
   if (errors.length) logSink("warn", "rejected: " + errors.join("; "));
-  board.enqueue(ops.map(({ cue, ...step }) => step)); // this page is about the pen, not about syncing to speech: draw each step at once
+  board.enqueue(ops.map(({ cue, ref, ...step }) => (step.parts ? { ...step, parts: step.parts.map(({ cue: c, ref: r, ...part }) => part) } : step))); // this page is about the pen, not about syncing to speech: draw each step (and each diagram part) at once
   return ops;
 }
 async function playTurns(board, turns) { for (const turn of turns) { play(board, turn); await board.idle(); } }

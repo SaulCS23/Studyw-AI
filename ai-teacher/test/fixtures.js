@@ -38,16 +38,16 @@
       { teacher: "Plants use sunlight inside the chloroplast to turn carbon dioxide and water into sugar and oxygen.", ops: [
         { op: "new_page", title: "Photosynthesis", cue: "Plants use sunlight" },
         { op: "write", kind: "text", size: "title", content: "Photosynthesis", id: "btitle", cue: "Plants use sunlight" },
-        { op: "group", id: "leaf", w: 500, h: 320, cue: "sunlight" },
-        { op: "shape", group: "leaf", shape: "circle", x: 80, y: 80, r: 40, color: "amber", fill: true, id: "sun", cue: "sunlight" },
-        { op: "write", group: "leaf", kind: "text", size: "small", content: "sun", x: 52, y: 130, color: "amber", id: "sunl", cue: "sunlight" },
-        { op: "shape", group: "leaf", shape: "arrow", points: [[125, 100], [230, 170]], color: "amber", id: "light", cue: "sunlight" },
-        { op: "shape", group: "leaf", shape: "ellipse", x: 300, y: 200, rx: 130, ry: 80, color: "green", fill: true, id: "chloroplast", cue: "chloroplast" },
-        { op: "write", group: "leaf", kind: "text", size: "small", content: "chloroplast", x: 235, y: 185, color: "green", id: "chlorol", cue: "chloroplast" },
-        { op: "shape", group: "leaf", shape: "arrow", points: [[470, 60], [400, 150]], color: "blue", id: "co2", cue: "carbon dioxide" },
-        { op: "write", kind: "math", content: "CO_2 + H_2O", near: "leaf", side: "right", color: "blue", id: "inputs", cue: "carbon dioxide and water" },
-        { op: "shape", group: "leaf", shape: "arrow", points: [[300, 284], [300, 316]], color: "violet", dashed: true, id: "out", cue: "sugar and oxygen" },
-        { op: "write", kind: "math", content: "C_6H_{12}O_6 + O_2", near: "inputs", side: "below", color: "violet", id: "outputs", cue: "sugar and oxygen" },
+        { op: "diagram", id: "photo", layout: "row", cue: "sunlight", parts: [
+          { node: "sun", label: "Sunlight", shape: "circle", color: "amber", cue: "sunlight" },
+          { node: "inputs", label: "CO2 and water", shape: "box", color: "blue", cue: "carbon dioxide and water" },
+          { node: "leaf", label: "Leaf", shape: "rounded", color: "green", cue: "inside the chloroplast" },
+          { node: "chl", label: "Chloroplast", shape: "rounded", color: "green", in: "leaf", cue: "the chloroplast" },
+          { node: "out", label: "Sugar and oxygen", shape: "box", color: "violet", cue: "sugar and oxygen" },
+          { from: "sun", to: "leaf", label: "light", color: "amber", cue: "sunlight" },
+          { from: "inputs", to: "leaf", label: "", color: "blue", cue: "carbon dioxide and water" },
+          { from: "leaf", to: "out", label: "makes", color: "violet", cue: "into sugar and oxygen" },
+        ] },
       ] },
     ],
   };
@@ -57,19 +57,18 @@
     turns: [
       { teacher: "Let's put the story of Rome on a timeline: Augustus in 27 BC, the split of the empire in 395, and the fall of the West in 475.", ops: [
         { op: "new_page", title: "Rome", cue: "put the story of Rome" },
-        { op: "write", kind: "text", size: "title", content: "Rome: a timeline", id: "htitle", cue: "put the story of Rome" },
-        { op: "group", id: "tl", w: 880, h: 220, cue: "timeline" },
-        { op: "shape", group: "tl", shape: "arrow", points: [[10, 110], [870, 110]], id: "line", cue: "timeline" },
-        { op: "shape", group: "tl", shape: "circle", x: 140, y: 110, r: 12, color: "red", fill: true, id: "m1", cue: "Augustus" },
-        { op: "write", group: "tl", kind: "text", size: "small", content: "27 BC: Augustus", x: 60, y: 50, id: "t1", cue: "Augustus" },
-        { op: "shape", group: "tl", shape: "circle", x: 440, y: 110, r: 12, color: "blue", fill: true, id: "m2", cue: "the split" },
-        { op: "write", group: "tl", kind: "text", size: "small", content: "395: empire splits", x: 330, y: 140, id: "t2", cue: "the split" },
-        { op: "shape", group: "tl", shape: "circle", x: 740, y: 110, r: 12, color: "green", fill: true, id: "m3", cue: "the fall" },
-        { op: "write", group: "tl", kind: "text", size: "small", content: "475: West falls", x: 640, y: 50, id: "t3", cue: "the fall" },
+        { op: "diagram", id: "tl", title: "Rome: a timeline", layout: "row", cue: "put the story of Rome", parts: [
+          { node: "aug", label: "27 BC Augustus", shape: "rounded", color: "red", cue: "Augustus" },
+          { node: "split", label: "395 Empire splits", shape: "rounded", color: "blue", cue: "the split of the empire" },
+          { node: "fall", label: "West falls", shape: "rounded", color: "green", cue: "the fall of the West" },
+          { from: "aug", to: "split", label: "", cue: "the split of the empire" },
+          { from: "split", to: "fall", label: "", cue: "the fall of the West" },
+        ] },
+        { op: "write", kind: "text", size: "small", content: "Fall of the West: 475", id: "fallnote", near: "tl", side: "below", cue: "in 475" },
       ] },
       { teacher: "Sorry, I misspoke. The usual date for the fall is 476, not 475.", ops: [
-        { op: "correct", target: "t3", with: { op: "write", kind: "text", size: "small", content: "476: West falls", color: "red", id: "t3" }, cue: "476" },
-        { op: "highlight", target: "t3", color: "amber", cue: "not 475" },
+        { op: "correct", target: "fallnote", with: { op: "write", kind: "text", size: "small", content: "Fall of the West: 476", color: "red", id: "fallnote" }, cue: "476" },
+        { op: "highlight", target: "fallnote", color: "amber", cue: "not 475" },
       ] },
     ],
   };
@@ -81,10 +80,13 @@
       { teacher: "Switching to cells. Every living thing is made of them.", ops: [
         { op: "new_page", title: "Cells", cue: "Switching to cells" },
         { op: "write", kind: "text", size: "title", content: "Cells", id: "title2", cue: "Switching to cells" },
-        { op: "group", id: "cellg", w: 400, h: 300, cue: "made of them" },
-        { op: "shape", group: "cellg", shape: "ellipse", x: 200, y: 150, rx: 180, ry: 120, color: "green", id: "cell", cue: "made of them" },
-        { op: "shape", group: "cellg", shape: "circle", x: 200, y: 150, r: 45, color: "violet", fill: true, id: "nucleus", cue: "made of them" },
-        { op: "write", group: "cellg", kind: "text", size: "small", content: "nucleus", x: 160, y: 205, id: "nlabel", cue: "made of them" },
+        { op: "diagram", id: "cellg", layout: "row", cue: "made of them", parts: [
+          { node: "cell", label: "Cell", shape: "rounded", color: "green", cue: "made of them" },
+          { node: "nuc", label: "Nucleus", shape: "circle", color: "violet", in: "cell", cue: "made of them" },
+          { node: "mito", label: "Mitochondrion", shape: "rounded", color: "amber", in: "cell", cue: "made of them" },
+          { node: "wall", label: "Cell wall", shape: "box", cue: "made of them" },
+          { from: "wall", to: "cell", label: "protects", cue: "made of them" },
+        ] },
       ] },
     ],
   };
@@ -113,6 +115,74 @@
     ],
   };
 
+  /** Speaking only: an introduction that needs no picture. The board must not change. */
+  const speakOnly = {
+    subject: "speak only",
+    turns: [{ teacher: "Before we draw anything, let's talk about why graphs matter. A graph turns numbers into a picture you can reason about.", ops: [{ op: "moment", kind: "speak_only", note: "introduction, no picture needed" }] }],
+  };
+
+  /** Speaking and writing together: the formula is written while it is being said, not before. */
+  const writeWhileSaying = {
+    subject: "write while saying",
+    turns: [{ teacher: "Let's start with an example. Imagine a triangle. Now the area is one half times the base times the height.", ops: [
+      { op: "moment", kind: "write", note: "formula as it is said" },
+      { op: "write", kind: "math", content: "A = \\frac{1}{2} b h", id: "area", cue: "the area is one half" },
+    ] }],
+  };
+
+  /** Drawing a graph while explaining it, with a visual reference: "look at the vertex" must have been drawn by then. */
+  const graphWithReference = {
+    subject: "graph with a reference",
+    turns: [{ teacher: "Let's draw the parabola y equals x squared. It curves up on both sides. Now look at the vertex, right here at the bottom. It sits at zero, zero.", ops: [
+      { op: "moment", kind: "draw", note: "graph built as explained" },
+      { op: "graph", id: "pg", w: 420, h: 300, xmin: -3, xmax: 3, ymin: -1, ymax: 9, xlabel: "x", ylabel: "y", cue: "draw the parabola" },
+      { op: "plot", graph: "pg", fn: "x^2", color: "blue", label: "y = x²", id: "pcurve", cue: "curves up on both sides" },
+      { op: "point", graph: "pg", px: 0, py: 0, label: "vertex", color: "red", id: "pvertex", cue: "the vertex", ref: "look at the vertex" },
+      { op: "point_to", target: "pvertex", cue: "right here at the bottom" },
+    ] }],
+  };
+
+  /** Pointing at something that is already on the board, at the moment the teacher refers to it. (Needs the maths lesson first.) */
+  const pointAndExplain = {
+    subject: "point and explain",
+    turns: [{ teacher: "Notice the exponent here. It is the square. And now the minus four at the end, that is where the curve crosses the axis.", ops: [
+      { op: "moment", kind: "point", note: "refer to existing writing" },
+      { op: "point_to", target: "eq", cue: "the exponent here" },
+      { op: "highlight", target: "eq", color: "amber", cue: "minus four at the end" },
+    ] }],
+  };
+
+  /** A question to the student: nothing is drawn after it, and the answer is never written. */
+  const question = {
+    subject: "question",
+    turns: [{ teacher: "What do you think happens to y when x is zero?", ops: [{ op: "moment", kind: "wait", note: "the student answers" }] }],
+  };
+
+  /** Something is drawn to ask the question, and the answer is not. */
+  const questionAfterDrawing = {
+    subject: "question after drawing",
+    turns: [{ teacher: "Here is the line y equals two x. What is y when x is three?", ops: [
+      { op: "write", kind: "math", content: "y = 2x", id: "lineq", cue: "the line y equals two x" },
+      { op: "moment", kind: "wait", note: "question", cue: "What is y when x is three" },
+      { op: "write", kind: "math", content: "y = 6", id: "leaked", cue: "What is y when x is three" },
+    ] }],
+  };
+
+  /** A rhetorical question that opens a turn which then goes on: the question must not freeze the rest of the turn. */
+  const rhetorical = {
+    subject: "rhetorical opener",
+    turns: [{ teacher: "Can you see this triangle on the board? It has three sides and three angles.", ops: [
+      { op: "moment", kind: "wait", note: "(mistaken: decided from the first sentence alone)" },
+      { op: "write", kind: "text", content: "Triangle: 3 sides", id: "rh1", cue: "three sides and three angles" },
+    ] }],
+  };
+
+  /** A reference that the planner got wrong: the teacher says "look at the point" but nothing creates it. */
+  const missingReference = {
+    subject: "missing reference",
+    turns: [{ teacher: "Look at the point I just drew. It is the vertex.", ops: [{ op: "moment", kind: "speak_only" }] }],
+  };
+
   /** A showcase of everything the pen can do, for the slow-motion handwriting page. */
   const handwriting = {
     subject: "handwriting showcase",
@@ -134,17 +204,16 @@
       ] },
       { teacher: "And a diagram: arrows, shapes and labels.", ops: [
         { op: "new_page", title: "Water cycle", cue: "And a diagram" },
-        { op: "write", kind: "text", size: "title", content: "Water cycle", id: "wc", cue: "And a diagram" },
-        { op: "group", id: "cycle", w: 800, h: 400, cue: "arrows" },
-        { op: "shape", group: "cycle", shape: "circle", x: 100, y: 90, r: 48, color: "amber", fill: true, id: "sun", cue: "arrows" },
-        { op: "write", group: "cycle", kind: "text", size: "small", content: "sun", x: 76, y: 150, color: "amber", id: "sunl", cue: "arrows" },
-        { op: "shape", group: "cycle", shape: "curve", points: [[40, 350], [220, 320], [410, 340], [600, 310]], color: "blue", id: "sea", cue: "shapes" },
-        { op: "write", group: "cycle", kind: "text", size: "small", content: "sea", x: 300, y: 360, color: "blue", id: "seal", cue: "shapes" },
-        { op: "shape", group: "cycle", shape: "arrow", points: [[420, 320], [420, 130]], color: "violet", id: "up", cue: "labels" },
-        { op: "write", group: "cycle", kind: "text", size: "small", content: "evaporation", x: 440, y: 220, color: "violet", id: "upl", cue: "labels" },
-        { op: "shape", group: "cycle", shape: "ellipse", x: 560, y: 80, rx: 110, ry: 50, color: "ink", id: "cloud", cue: "labels" },
-        { op: "write", group: "cycle", kind: "text", size: "small", content: "cloud", x: 520, y: 60, id: "cloudl", cue: "labels" },
-        { op: "shape", group: "cycle", shape: "arrow", points: [[600, 140], [640, 260]], color: "blue", dashed: true, id: "rain", cue: "labels" },
+        { op: "diagram", id: "cycle", title: "The water cycle", layout: "cycle", cue: "And a diagram", parts: [
+          { node: "evap", label: "Evaporation", shape: "rounded", color: "violet", cue: "arrows" },
+          { node: "cloud", label: "Cloud", shape: "ellipse", color: "ink", cue: "shapes" },
+          { node: "rain", label: "Rain", shape: "circle", color: "blue", cue: "labels" },
+          { node: "sea", label: "Ocean", shape: "rounded", color: "blue", cue: "labels" },
+          { from: "evap", to: "cloud", label: "rises", cue: "arrows" },
+          { from: "cloud", to: "rain", label: "cools", cue: "shapes" },
+          { from: "rain", to: "sea", label: "falls", cue: "labels" },
+          { from: "sea", to: "evap", label: "warms", cue: "labels" },
+        ] },
       ] },
     ],
   };
@@ -168,5 +237,24 @@
     };
   }
 
-  return { mathematics, biology, history, topicChange, revisit, sentences, handwriting, longLesson, all: [mathematics, biology, history, topicChange, handwriting] };
+  /** A long lesson of small diagrams and notes: several pages, each diagram readable. */
+  function longDiagrams(turns) {
+    const layouts = ["row", "cycle", "grid", "column", "cycle", "row"];
+    const names = [["Source", "River", "Delta"], ["Spring", "Summer", "Autumn", "Winter"], ["Cause", "Event", "Effect", "Result"], ["Seed", "Plant", "Fruit"], ["Plan", "Do", "Check", "Act"], ["Input", "Process", "Output"]];
+    return {
+      subject: "long diagrams",
+      turns: Array.from({ length: turns }, (_, n) => {
+        const kind = n % layouts.length, nodes = names[kind];
+        const parts = nodes.map((label, i) => ({ node: "dn" + n + "_" + i, label, shape: ["box", "rounded", "ellipse", "circle"][(i + n) % 4], cue: label.toLowerCase() }));
+        nodes.forEach((_, i) => { if (i + 1 < nodes.length) parts.push({ from: "dn" + n + "_" + i, to: "dn" + n + "_" + (i + 1), label: ["then", "leads to", "becomes"][i % 3], cue: nodes[i + 1].toLowerCase() }); });
+        if (layouts[kind] === "cycle") parts.push({ from: "dn" + n + "_" + (nodes.length - 1), to: "dn" + n + "_0", label: "again", cue: nodes[0].toLowerCase() });
+        return { teacher: `Now example ${n + 1}: ${nodes.join(", ").toLowerCase()}.`, ops: [
+          { op: "diagram", id: "dg" + n, title: "Example " + (n + 1), layout: layouts[kind], parts, cue: "example " + (n + 1) },
+          { op: "write", kind: "text", size: "small", content: "Remember example " + (n + 1), id: "dnote" + n, cue: nodes[nodes.length - 1].toLowerCase() },
+        ] };
+      }),
+    };
+  }
+
+  return { mathematics, biology, history, topicChange, revisit, sentences, speakOnly, writeWhileSaying, graphWithReference, pointAndExplain, question, questionAfterDrawing, rhetorical, missingReference, handwriting, longLesson, longDiagrams, all: [mathematics, biology, history, topicChange, handwriting] };
 });

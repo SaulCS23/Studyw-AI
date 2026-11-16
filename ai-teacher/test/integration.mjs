@@ -26,7 +26,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const [math, biology, history, topic] = fixtures.all;
 const elephantTurn = { teacher: "Now look at the purple elephant over there.", ops: [{ op: "write", kind: "text", size: "body", content: "elephant", id: "el", cue: "purple elephant" }] };
 const toolRequestOps = [{ op: "write", kind: "text", size: "title", content: "Triangles", id: "tri-title" }, { op: "shape", shape: "polygon", points: [[300, 420], [500, 220], [700, 420]], color: "blue", id: "tri" }, { op: "write", kind: "text", size: "small", content: "three sides", x: 420, y: 450, id: "tri-label" }];
-const turnsByText = [...fixtures.all.flatMap((l) => l.turns), ...fixtures.revisit.turns, ...fixtures.sentences.turns, ...fixtures.longLesson(10).turns, elephantTurn];
+const turnsByText = [...fixtures.all.flatMap((l) => l.turns), ...fixtures.revisit.turns, ...fixtures.sentences.turns, ...fixtures.speakOnly.turns, ...fixtures.graphWithReference.turns, ...fixtures.pointAndExplain.turns, ...fixtures.question.turns, ...fixtures.questionAfterDrawing.turns, ...fixtures.missingReference.turns, ...fixtures.longLesson(10).turns, elephantTurn];
 const service = { delayMs: 0, plannerStatus: 200, planner: [], classic: [] }; // what the page asked for is logged here
 
 const elevenLabsStub = `export const Conversation = { async startSession(opts){ window.__opts = opts;
@@ -226,7 +226,7 @@ try {
   const afterInterrupt = await count(), stateAtInterrupt = await strokeState();
   await sleep(3500);
   const later = await count(), stateLater = await strokeState();
-  check("interruption stops the remaining drawing", later === afterInterrupt && later < beforeBiology + biology.turns[0].ops.length, `${beforeBiology} -> ${afterInterrupt} -> ${later}`);
+  check("interruption stops the remaining drawing", later === afterInterrupt && later < beforeBiology + 10, `${beforeBiology} -> ${afterInterrupt} -> ${later}`);
   check("what was already drawn stays on the board", (await Promise.all(["title", "eq", "g", "curve"].map(has))).every(Boolean));
   check("no stroke is left half-drawn and the pencil is put away", stateLater.partial === 0 && stateLater.pencil === 0 && stateLater.done === stateAtInterrupt.done, JSON.stringify({ stateAtInterrupt, stateLater }));
 
@@ -245,11 +245,12 @@ try {
   // 5. Changing the subject: a NEW PAGE, and the earlier pages are kept with their handwriting
   const pagesBeforeTopic = (await wbState()).pages.length;
   await speak(topic.turns[0].teacher);
-  await waitFor(() => has("nucleus"), "new subject drawn", 90000);
+  await waitFor(() => has("wall"), "new subject drawn", 90000);
   await settled();
-  check("topic change: the old subject is still in the notebook, on its earlier page", (await has("curve")) && (await has("title")) && (await has("eq")) && (await has("btitle")) && (await has("leaf"))); // biology was interrupted after its first two elements, so only those are guaranteed
-  check("topic change: the new subject is on a new page of its own", (await Promise.all(["title2", "cellg", "cell", "nucleus", "nlabel"].map(has))).every(Boolean) && (await wbState()).pages.length === pagesBeforeTopic + 1 && (await page("window.__wb.items.get('title2').page.number")) === pagesBeforeTopic + 1);
+  check("topic change: the old subject is still in the notebook, on its earlier page", (await has("curve")) && (await has("title")) && (await has("eq")) && (await has("btitle")) && (await has("photo"))); // biology was interrupted after its first two elements, so only those are guaranteed
+  check("topic change: the new subject is on a new page of its own", (await Promise.all(["title2", "cellg", "cell", "nuc", "mito", "wall"].map(has))).every(Boolean) && (await wbState()).pages.length === pagesBeforeTopic + 1 && (await page("window.__wb.items.get('title2').page.number")) === pagesBeforeTopic + 1);
   check("topic change: the earlier page still shows its own writing", (await page("window.__wb.items.get('eq').page.number")) === 1 && (await page("window.__wb.pages[0].g.querySelectorAll('[data-wb-hand] path').length")) > 20);
+  await shoot("live_cell_diagram");
   const nb = await pageButtons();
   check("notebook controls: appear with one numbered button per page, the live page marked and current", (await visible("notebook")) && nb.length === pagesBeforeTopic + 1 && nb.at(-1).live && nb.at(-1).current && !(await returnVisible()), JSON.stringify(nb));
   check("notebook controls: say which page it is", (await info()).startsWith("Page " + nb.length + " of " + nb.length) && (await info()).includes("(live)"), await info());
@@ -389,6 +390,53 @@ try {
   await page("window.__wb.timeScale = 2; true");
   await shoot("live_notebook");
 
+  // 6g. TEACHING MOMENTS on the real page: speak only, a question, a visual reference, and what the planner is told
+  await page("window.__wb.timeScale = 2; true");
+  // (a) A verbal introduction: nothing is drawn, the badge says so, and it is NOT treated as a failure (no classic fallback)
+  await hear("Why do graphs matter?");
+  const itemsBeforeSpeak = await count(), classicBeforeSpeak = service.classic.length, plannerBeforeSpeak = service.planner.length;
+  await speak(fixtures.speakOnly.turns[0].teacher);
+  await waitFor(() => service.planner.length > plannerBeforeSpeak, "planner asked", 10000);
+  await waitFor(async () => (await badge()).includes("speaking only"), "speaking-only badge", 10000);
+  check("speak only: the board is unchanged, the badge says the teacher is only speaking, and there is no classic fallback", (await count()) === itemsBeforeSpeak && service.classic.length === classicBeforeSpeak && !(await badge()).includes("fallback"), await badge());
+  check("speak only: the planner is not asked to draw (the log says the teacher explains without drawing) and the moment is recorded", (await events("nothing")).some((m) => m.includes("explains without drawing")) && (await events("moment")).some((m) => m.includes("speak only")));
+  // (b) A question to the student: nothing is drawn, the board waits
+  await hear("I am not sure.");
+  const itemsBeforeQ = await count(), plannerBeforeQ = service.planner.length;
+  await speak(fixtures.question.turns[0].teacher);
+  await waitFor(() => service.planner.length > plannerBeforeQ, "planner asked about the question", 10000);
+  await waitFor(async () => (await badge()).includes("waiting for the student"), "waiting badge", 10000);
+  const questionPrompt = service.planner.at(-1).messages[0].content;
+  check("question: the board is unchanged, the badge says it is waiting for the student", (await count()) === itemsBeforeQ && (await badge()).includes("waiting for the student"), await badge());
+  check("question: the planner was told the turn ends with a question and must not give the answer", questionPrompt.includes("ends with a question") && questionPrompt.includes("never the answer"));
+  // (c) A visual reference: the planner is told, and the drawing is ready in time (measured on the real page)
+  await hear("Can you show the parabola?");
+  const refTurn = fixtures.graphWithReference.turns[0], plannerBeforeRef = service.planner.length;
+  await speak(refTurn.teacher);
+  await waitFor(() => service.planner.length > plannerBeforeRef, "planner asked about the graph", 10000);
+  const refPrompt = service.planner.at(-1).messages[0].content;
+  check("reference: the planner is told which of the teacher's words refer to something visible", refPrompt.includes("Visual references") && refPrompt.includes("look at the vertex"), refPrompt.slice(-400));
+  await waitFor(() => has("pvertex"), "vertex drawn", 60000);
+  await settled(3000);
+  const refLogs = await events("sync");
+  const refLine = refLogs.find((m) => m.includes('Reference "look at the vertex"'));
+  check("reference: the page measured it, and the vertex was finished before the teacher said 'look at the vertex'", !!refLine && !refLine.includes("too late") && refLine.includes("before"), String(refLine) + " | " + JSON.stringify(refLogs.slice(-3)));
+  check("reference: the graph, its curve and the labelled vertex are all there, and the pointer came with the words", (await Promise.all(["pg", "pcurve", "pvertex"].map(has))).every(Boolean) && (await page("window.__wb.timeline.some((t) => t.op === 'point_to')")));
+  await shoot("live_reference_graph");
+  const overlapsNow = await overlaps();
+  check("reference: still zero overlap on every page", overlapsNow.length === 0, overlapsNow.join(" | "));
+  // (d) The sync summary is reported, from measurements
+  await page("__opts.onModeChange({ mode: 'listening' }); true");
+  await sleep(1100);
+  check("sync report: the page reports how the writing kept up (references checked, late ones counted)", (await events("sync")).some((m) => m.startsWith("Sync so far:") && m.includes("spoken references checked")), JSON.stringify((await events("sync")).slice(-2)));
+  // (e) Audio events arriving out of order (by event id) are put back in speaking order
+  await hear("Say that again, slowly.");
+  await speak(fixtures.sentences.turns[0].teacher);
+  const sentenceChunks = ["First we look at the triangle. ", "Then we mark the right angle. ", "Finally we write the formula for the area."];
+  await page(`__opts.onAudioAlignmentPlayback({ event_id: 3, alignment: { chars: ${JSON.stringify(Array.from(sentenceChunks[2]))} } }); __opts.onAudioAlignmentPlayback({ event_id: 1, alignment: { chars: ${JSON.stringify(Array.from(sentenceChunks[0]))} } }); __opts.onAudioAlignmentPlayback({ event_id: 2, alignment: { chars: ${JSON.stringify(Array.from(sentenceChunks[1]))} } }); true`);
+  check("audio events out of order: the page puts them back in order", (await page("window.__wb.clock.chars.join('')")) === sentenceChunks.join(""), await page("window.__wb.clock.chars.join('')"));
+  await settled(2500);
+
   // 7. THE AGENT'S show_on_board TOOL: in Animated mode its finished HTML must not appear at once.
   await hear("Can you show me a triangle?");
   const keptItems = await count(), planBefore = service.planner.length, classicBefore0 = service.classic.length;
@@ -403,7 +451,7 @@ try {
   const stTool = await settled();
   await shoot("live_tool_done");
   check("the tool's content was written and drawn by the pen, stroke by stroke", (await has("tri-title")) && stTool.total > 10 && stTool.done === stTool.total, JSON.stringify(stTool));
-  check("animated board stayed on screen and kept earlier drawing", (await visible("wbBoard")) && (await count()) > keptItems && (await has("nucleus")));
+  check("animated board stayed on screen and kept earlier drawing", (await visible("wbBoard")) && (await count()) > keptItems && (await has("wall")));
   check("no classic request was made for the tool call", service.classic.length === classicBefore0);
 
   // 7b. Tool call that arrives after this turn's drawing already started: the teacher's words keep driving it
@@ -444,7 +492,7 @@ try {
   await speak(math.turns[0].teacher);
   await waitFor(() => visible("wbBoard"), "animated board returns after a fallback", 30000);
   await waitFor(() => has("curve"), "new drawing finished", 90000);
-  check("animated board returns on the next good plan, with its earlier content", (await has("nucleus")) && (await has("curve")));
+  check("animated board returns on the next good plan, with its earlier content", (await has("wall")) && (await has("curve")));
   await settled();
   check("badge returns to Animated", (await badge()).includes("Animated"), await badge());
 

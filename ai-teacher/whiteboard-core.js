@@ -17,10 +17,14 @@
   const COLORS = ["ink", "blue", "red", "green", "amber", "violet"];
   const SIZES = ["title", "body", "small"];
   const SHAPES = ["line", "arrow", "rect", "circle", "ellipse", "polyline", "polygon", "curve"];
-  const OPS = ["write", "graph", "plot", "point", "shape", "group", "highlight", "erase", "correct", "new_page", "go_to_page", "point_to", "clear", "pause"];
+  const OPS = ["write", "graph", "plot", "point", "shape", "group", "diagram", "highlight", "erase", "correct", "new_page", "go_to_page", "point_to", "moment", "clear", "pause"];
+  const MOMENTS = ["speak_only", "write", "draw", "point", "wait"];
+  const DIAGRAM_LAYOUTS = ["row", "column", "grid", "cycle"];
+  const NODE_SHAPES = ["box", "rounded", "ellipse", "circle", "none"];
+  const LINK_STYLES = ["arrow", "line", "dashed"];
   const SIDES = ["right", "below", "left", "above"];
   const PAGE_KEYWORDS = ["latest", "previous", "next", "first"];
-  const LIMITS = { opsPerPlan: 14, textLength: 90, latexLength: 160, pointsPerShape: 40, idLength: 24, cueLength: 60, pauseMs: 1500, expressionLength: 80 };
+  const LIMITS = { diagramParts: 16, diagramNodes: 8, labelLength: 28, opsPerPlan: 14, textLength: 90, latexLength: 160, pointsPerShape: 40, idLength: 24, cueLength: 60, pauseMs: 1500, expressionLength: 80 };
   const PLANNER_MODEL = "claude-sonnet-5-5";
 
   /* ---------- Safe expression parser ---------- */
@@ -136,13 +140,15 @@
       groups: new Map(Object.entries((context && context.groups) || {})),
       pages: new Set((context && context.pages) || []),
     };
+    state.owners = new Map(Object.entries((context && context.owners) || {})); // which diagram (or graph) an item belongs to
+    state.notes = [];
     let autoId = 0, accepted = 0;
     state.freshId = () => { let id; do { id = "a" + (++autoId); } while (state.known.has(id)); return id; };
     return {
       validate(raw) {
         if (accepted >= LIMITS.opsPerPlan) return { op: null, error: "Too many ops, kept the first " + LIMITS.opsPerPlan };
-        try { const op = validateOperation(raw, state, true); if (op) accepted++; return { op, error: null }; }
-        catch (error) { return { op: null, error: error.message }; }
+        try { const op = validateOperation(raw, state, true); if (op) accepted++; return { op, error: null, notes: state.notes.splice(0) }; }
+        catch (error) { state.notes.length = 0; return { op: null, error: error.message, notes: [] }; }
       },
     };
   }
@@ -154,8 +160,9 @@
     const validator = createValidator(context), ops = [], errors = [];
     if (rawOps.length > LIMITS.opsPerPlan) errors.push("Too many ops, kept the first " + LIMITS.opsPerPlan);
     rawOps.slice(0, LIMITS.opsPerPlan).forEach((raw, index) => {
-      const { op, error } = validator.validate(raw);
+      const { op, error, notes } = validator.validate(raw);
       if (op) ops.push(op); else if (error) errors.push("op " + index + ": " + error);
+      for (const note of notes || []) errors.push("op " + index + ": " + note);
     });
     return { ops, errors };
   }
@@ -166,8 +173,9 @@
     if (name === "clear") name = "new_page"; // changing topic never destroys earlier pages: it starts a new one
     if (!OPS.includes(name)) throw new Error("unknown op " + JSON.stringify(name));
     const out = { op: name };
-    const cue = clean(raw.cue, LIMITS.cueLength);
+    const cue = clean(raw.cue, LIMITS.cueLength), ref = clean(raw.ref, LIMITS.cueLength);
     if (cue) out.cue = cue;
+    if (ref) out.ref = ref; // the words where the teacher REFERS to this ("look at the point"): it must be drawn by then
     const color = pick(raw.color, COLORS, "ink");
     const { known, graphs, groups, pages } = state;
 
@@ -271,6 +279,74 @@
         }
         creates(); break;
       }
+      case "diagram": {
+        if (!Array.isArray(raw.parts)) throw new Error("diagram needs parts");
+        const diagramId = raw.id === undefined ? state.freshId() : raw.id;
+        if (!isId(diagramId)) throw new Error("bad id");
+        out.title = clean(raw.title, 40);
+        out.layout = pick(raw.layout, DIAGRAM_LAYOUTS, null) || undefined;
+        if (finite(raw.cols)) out.cols = clampNumber(Math.round(raw.cols), 1, 4, 3);
+        const notes = state.notes, taken = new Set();
+        // An id is free for this diagram if nothing else uses it (or what uses it belongs to this very diagram, which is being replaced).
+        // A node must never take over the id of another element: drawing it would delete that element.
+        const free = (id) => id !== diagramId && !taken.has(id) && (!known.has(id) || state.owners.get(id) === diagramId);
+        const unique = (id) => { if (free(id)) return id; let n = 2, candidate; do { candidate = id.slice(0, LIMITS.idLength - 3) + "_" + n++; } while (!free(candidate)); return candidate; };
+        const items = raw.parts.slice(0, LIMITS.diagramParts).filter((p) => p && typeof p === "object");
+        const declared = new Set();
+        for (const p of items) { // first the nodes, so links and containers can refer to nodes declared later in the list
+          if (p.node === undefined) continue;
+          if (!isId(p.node) || declared.has(p.node)) { notes.push("diagram node: bad or repeated id " + JSON.stringify(p.node)); continue; }
+          if (declared.size >= LIMITS.diagramNodes) { notes.push("diagram has too many nodes; kept the first " + LIMITS.diagramNodes); break; }
+          declared.add(p.node);
+        }
+        let parts = []; const kept = new Set();
+        for (const p of items) {
+          const part = {}, pc = clean(p.cue, LIMITS.cueLength), pr = clean(p.ref, LIMITS.cueLength);
+          if (pc) part.cue = pc; if (pr) part.ref = pr;
+          if (p.node !== undefined) {
+            if (!declared.has(p.node) || kept.has(p.node)) continue;
+            const label = clean(p.label, LIMITS.labelLength);
+            if (!label) { notes.push("diagram node " + p.node + " has no label"); declared.delete(p.node); continue; }
+            Object.assign(part, { type: "node", id: p.node, label, shape: pick(p.shape, NODE_SHAPES, "rounded"), color: pick(p.color, COLORS, "ink") });
+            if (p.in !== undefined) { if (isId(p.in) && p.in !== p.node && declared.has(p.in)) part.in = p.in; else notes.push("diagram node " + p.node + ": container " + JSON.stringify(p.in) + " is not a node of this diagram"); }
+            kept.add(p.node); parts.push(part);
+          } else if (p.from !== undefined || p.to !== undefined) {
+            if (!declared.has(p.from) || !declared.has(p.to) || p.from === p.to) { notes.push("diagram link " + JSON.stringify([p.from, p.to]) + " joins things that are not nodes of this diagram"); continue; }
+            Object.assign(part, { type: "link", from: p.from, to: p.to, label: clean(p.label, 24), style: pick(p.style, LINK_STYLES, "arrow"), color: pick(p.color, COLORS, "ink") });
+            parts.push(part);
+          }
+        }
+        // a link whose node was dropped (no label) goes too, and a container that was dropped leaves its children at the top level
+        parts = parts.filter((part) => part.type !== "link" || (kept.has(part.from) && kept.has(part.to)));
+        for (const part of parts) if (part.in && !kept.has(part.in)) delete part.in;
+        // containers must not form a loop (A in B, B in A): break it
+        const containerOf = new Map(parts.filter((q) => q.type === "node").map((q) => [q.id, q.in]));
+        for (const part of parts) {
+          if (part.type !== "node") continue;
+          const seen = new Set([part.id]); let up = part.in;
+          while (up) { if (seen.has(up)) { notes.push("diagram node " + part.id + ": containers cannot contain each other; " + part.id + " is drawn at the top level"); delete part.in; containerOf.set(part.id, undefined); break; } seen.add(up); up = containerOf.get(up); }
+        }
+        if (!parts.some((q) => q.type === "node")) throw new Error("diagram has no nodes");
+        // everything inside a container is drawn after it, however deep (the container, then what is inside it, then the next node)
+        const nodeList = parts.filter((q) => q.type === "node"), byId = new Map(nodeList.map((q) => [q.id, q])), emitted = new Set(), ordered = [];
+        const emit = (q) => { if (emitted.has(q.id)) return; emitted.add(q.id); if (q.in && byId.has(q.in)) emit(byId.get(q.in)); ordered.push(q); };
+        nodeList.forEach(emit);
+        let take = 0; parts = parts.map((q) => (q.type === "node" ? ordered[take++] : q));
+        // give every node and connector an id nothing else on the board uses, and follow the renames in the links
+        const rename = new Map();
+        for (const part of parts) if (part.type === "node") { const id = unique(part.id); if (id !== part.id) notes.push("diagram node id " + part.id + " is already used by something else on the board; renamed to " + id); taken.add(id); rename.set(part.id, id); }
+        let linkNumber = 0;
+        for (const part of parts) {
+          if (part.type === "node") { part.id = rename.get(part.id); if (part.in) part.in = rename.get(part.in); }
+          else { part.from = rename.get(part.from); part.to = rename.get(part.to); const id = unique(diagramId + "-l" + ++linkNumber); taken.add(id); part.id = id; }
+        }
+        out.id = diagramId; known.add(diagramId);
+        for (const part of parts) known.add(part.id); // so a later step can highlight or point to a node or a connector
+        out.parts = parts;
+        placement();
+        break;
+      }
+      case "moment": out.kind = pick(raw.kind, MOMENTS, null); if (!out.kind) throw new Error("unknown moment"); out.note = clean(raw.note, 60); break;
       case "highlight": out.target = mustExist("target"); out.color = pick(raw.color, COLORS, "amber"); break;
       case "point_to": out.target = mustExist("target"); out.return = raw.return !== false; break;
       case "erase":
@@ -297,22 +373,28 @@
   /* ---------- The planner: a separate Claude call that streams one drawing step per line ---------- */
 
   const PLANNER_SYSTEM = [
-    "You are the whiteboard hand of a live voice tutor, for any subject. The teacher is speaking: write and draw WHAT THE TEACHER IS SAYING, AT THE MOMENT THEY SAY IT.",
-    "A pen draws everything stroke by stroke, so work in SMALL steps: one phrase, one formula, one label or one arrow at a time. Key words, never sentences. At most 6 steps for this turn (a diagram may use up to 12).",
-    'Tie every step to the words that introduce it: "cue" = 2-5 words copied EXACTLY from the teacher\'s latest turn, at the point where that step\'s idea begins. A step is drawn when the teacher reaches its cue, so list steps in the order the teacher says things and never draw anything the teacher has not said yet.',
-    "Output ONLY JSON objects, one per line (JSON Lines), in drawing order. No prose, no code fences.",
-    "You never choose positions: the board places everything in free space and starts a new page by itself when needed. Give x and y only inside a diagram group (local coordinates).",
-    "Steps (all fields in braces are optional; every step may have cue):",
-    '{"op":"write","kind":"text"|"math","content":"...","size":"title"|"body"|"small","color":C,"id":"name","cue":"...",near:"id",side:"right"|"below",calc:"name"}   near+side puts it beside an element; calc: give every line of one calculation the same name so the lines stay together.',
-    '{"op":"graph","id":"g","w":420,"h":300,"xmin","xmax","ymin","ymax","xlabel","ylabel","grid":true}   then   {"op":"plot","graph":"g","fn":"x^2-3*x+1","color":C,"label":"short"}   {"op":"point","graph":"g","px","py","label","color":C}',
-    '{"op":"group","id":"cell","w":420,"h":300,near,side}  reserves a frame for a diagram. Then draw its parts one by one with "group":"cell" and local coordinates inside 0..w, 0..h: {"op":"shape","group":"cell","shape":"line"|"arrow"|"polyline"|"polygon"|"curve","points":[[x,y],...],"color":C,"dashed":true,"id":"name"}  {"op":"shape","group":"cell","shape":"rect","x","y","w","h"}  {"op":"shape","group":"cell","shape":"circle","x","y","r"}  {"op":"shape","group":"cell","shape":"ellipse","x","y","rx","ry"}  {"op":"write","group":"cell","kind":"text","content":"label","size":"small","x","y"}  (fill:true tints closed shapes). Draw each part when the teacher mentions it. A lone arrow or shape needs no group.',
-    '{"op":"highlight","target":"id","color":C}   {"op":"point_to","target":"id"}  (the teacher points at an existing element, on any page)   {"op":"erase","target":"id"}   {"op":"correct","target":"id","with":{a write or shape step}}   {"op":"pause","ms":500}',
+    "You are the whiteboard hand of a live voice tutor, for any subject. You never speak: a teacher's VOICE does, and its words are given below. Decide, like a good human teacher, WHETHER to draw, WHAT, and WHEN.",
+    "Teaching moments (one turn may mix them):",
+    '- speak only: explaining, a story, a hint, encouragement, a definition that needs no picture. Draw nothing: output just {"op":"moment","kind":"speak_only"}. Do not draw only because you can.',
+    "- write: the teacher states an equation, a key term or a result: write it as it is said.",
+    "- draw: the teacher explains a graph or a diagram: build it piece by piece, each piece when it is mentioned.",
+    '- point: the teacher refers to something already on the board: {"op":"point_to","target":"id"} (or highlight) at that moment.',
+    '- wait: the teacher asks the student a question or invites an attempt. Draw only what the question needs, NEVER its answer, and end with {"op":"moment","kind":"wait"}. Nothing is drawn after it.',
+    'Every step may have "cue": 2-5 words copied EXACTLY from the teacher\'s turn, where that step\'s idea begins. It is drawn when the teacher reaches its cue and never before, so the teacher can say an idea aloud first and the writing starts when they introduce it. Order steps as the teacher says things.',
+    'References: if the teacher\'s words refer to something visible ("look at...", "this point", "the curve I drew", "as you can see"), that thing must already be on the board by then: put "ref" (those exact words) on the step that creates it, and the pen will start early enough to finish first. Never let the teacher refer to something your steps do not draw.',
+    "A pen draws everything stroke by stroke: key words and short phrases, never sentences; at most 6 steps for this turn (a diagram may use up to 14 parts). Output ONLY JSON objects, one per line (JSON Lines), in drawing order. No prose, no code fences.",
+    "You never choose positions or sizes: the board places everything in free space, aligns equations, pads text inside shapes and starts a new page by itself when needed.",
+    "Steps (fields in braces are optional; every step may also have cue and ref):",
+    '{"op":"write","kind":"text"|"math","content":"...","size":"title"|"body"|"small","color":C,"id":"name",near:"id",side:"right"|"below",calc:"name"}   calc: give every line of one calculation the same name: the lines stay together and their = signs line up.',
+    '{"op":"graph","id":"g","w":420,"h":300,"xmin","xmax","ymin","ymax","xlabel","ylabel","grid":true}  then  {"op":"plot","graph":"g","fn":"x^2-3*x+1","color":C,"label":"short"}  {"op":"point","graph":"g","px","py","label","color":C}. Create each plot or point when the teacher mentions it. Labels are placed beside what they name.',
+    '{"op":"diagram","id":"d1","title":"Water cycle","layout":"row"|"column"|"grid"|"cycle","parts":[{"node":"sun","label":"Sun","shape":"circle","cue":"..."},{"node":"sea","label":"Ocean","shape":"rounded","cue":"..."},{"from":"sun","to":"sea","label":"heats","style":"arrow"|"line"|"dashed","cue":"..."}]}. Nodes are things, links connect them. shape: box, rounded, ellipse, circle (short labels only) or none. A node can hold others: {"node":"cell","label":"Cell"} and then {"node":"nuc","label":"Nucleus","in":"cell"}. Parts are drawn in the order listed, each when its cue is reached. Keep diagrams SMALL and clean: a title, at most 6 nodes, labels under 4 words, one idea (a page cannot hold more without tiny writing). No coordinates. For plain notes use write, not boxes.',
+    '{"op":"highlight","target":"id","color":C}  {"op":"point_to","target":"id"}  {"op":"erase","target":"id"}  {"op":"correct","target":"id","with":{a write step}}  {"op":"pause","ms":500}  {"op":"moment","kind":"speak_only"|"write"|"draw"|"point"|"wait","note":"why"}',
     '{"op":"new_page","title":"short"}  {"op":"go_to_page","page":"p1"|"previous"|"latest"}',
     "C is one of ink, blue, red, green, amber, violet (ink by default).",
-    "Notebook: it has pages (p1, p2, ...). Start a new page (new_page) when the teacher begins a new topic or section, or when the summary says the live page is nearly full. Never erase a page to change topic. To refer back to something on an earlier page: go_to_page, then point_to the element, then go_to_page latest to return. Highlight and point only at things that exist in the summary. Add to the notebook; never redraw what is already there.",
+    "Notebook: pages p1, p2, ... Start a new page (new_page) when the teacher begins a new topic or section, or when the summary says the live page is nearly full. Never erase a page to change topic. To refer back: go_to_page, then point_to the element, then go_to_page latest. Point and highlight only at things listed in the summary, including diagram nodes. Add to the notebook; never redraw what is there.",
     "Math (kind=math) is LaTeX, supported: + - = < > ( ) [ ] / digits, letters, ^ and _ for powers and indices, \\frac{a}{b}, \\sqrt{x}, \\sqrt[3]{x}, \\sum_{i=1}^{n}, \\int_a^b, \\lim_{x \\to 0}, \\sin \\cos \\tan \\log \\ln, \\pm \\times \\cdot \\div \\leq \\geq \\neq \\approx \\infty \\to \\rightarrow \\Rightarrow \\circ \\partial \\nabla, Greek (\\alpha \\beta \\pi \\theta \\Delta ...), \\vec{v} \\bar{x} \\hat{x}, \\text{words}, \\left( \\right). No matrices, \\begin{...}, tables or colors inside LaTeX: write separate lines instead. Chemistry as math, e.g. H_2O.",
     "Text may be in the language the teacher speaks, using Latin letters with accents. Graphs: plot with explicit * and ^ (2*x+1, sin(x), x^2).",
-    "Give the first step quickly: the pen starts as soon as your first line arrives. If the turn is small talk or nothing visual would help, output nothing at all.",
+    "Give the first step quickly: the pen starts as soon as your first line arrives.",
   ].join("\n");
 
   const clip = (text, n) => String(text || "").replace(/\s+/g, " ").slice(0, n);
@@ -334,11 +416,17 @@
   }
 
   /** The user message for the planner. Only the last few turns are sent, to keep tokens and latency low. */
-  function buildPlannerMessage(turns, notebook, hint, handled) {
+  function buildPlannerMessage(turns, notebook, hint, handled, partial) {
     const recent = (turns || []).slice(-6).map((t) => (t.role === "teacher" ? "Teacher: " : "Student: ") + String(t.text).slice(0, 500));
+    const lastTeacher = [...(turns || [])].reverse().find((t) => t.role === "teacher"), said = lastTeacher ? String(lastTeacher.text) : "";
+    const references = findReferences(said);
+    const notes = [];
+    if (references.length) notes.push("Visual references in the teacher's words (each needs a step with \"ref\" that makes it exist in time): " + references.map((r) => '"' + r + '"').join(", ") + ".");
+    // (an early plan sees only the first sentence: a rhetorical opener is not the end of the turn, so no question note then)
+    if (!partial && endsWithQuestion(said)) notes.push("The teacher's turn ends with a question to the student: draw only what the question needs, never the answer, and end with a wait moment.");
     const request = hint ? "\n\nThe teacher also asked for this to be shown on the board (draw it step by step, shorter if it is long): " + clip(hint, 600) : "";
     const continued = handled ? "\n\nThe start of the teacher's latest turn is already on the board: \"" + clip(handled, 300) + "\". Only plan what comes after it." : "";
-    return "Notebook:\n" + summariseNotebook(notebook) + "\n\nConversation (oldest first):\n" + recent.join("\n") + continued + request;
+    return "Notebook:\n" + summariseNotebook(notebook) + "\n\nConversation (oldest first):\n" + recent.join("\n") + (notes.length ? "\n\n" + notes.join("\n") : "") + continued + request;
   }
 
   /**
@@ -347,14 +435,14 @@
    * Resolves to { ops, errors, usage } when the stream ends. Throws on network or auth problems (error.status is set
    * for HTTP errors) so the caller can fall back to the classic board; an aborted request throws an AbortError.
    */
-  async function planBoardStream({ apiKey, turns, notebook, context, hint, handled, fetchImpl, signal, model, onOps }) {
+  async function planBoardStream({ apiKey, turns, notebook, context, hint, handled, partial, fetchImpl, signal, model, onOps }) {
     const doFetch = fetchImpl || fetch;
     const response = await doFetch("https://api.anthropic.com/v1/messages", {
       method: "POST", signal,
       headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
       body: JSON.stringify({
         model: model || PLANNER_MODEL, max_tokens: 1200, stream: true, system: PLANNER_SYSTEM,
-        messages: [{ role: "user", content: buildPlannerMessage(turns, notebook, hint, handled) }],
+        messages: [{ role: "user", content: buildPlannerMessage(turns, notebook, hint, handled, partial) }],
       }),
     });
     if (!response.ok) { const error = new Error("Planner request failed: " + response.status); error.status = response.status; throw error; }
@@ -368,8 +456,9 @@
       if (line[0] !== "{") { errors.push("ignored non-JSON line: " + line.slice(0, 60)); return null; }
       let parsed;
       try { parsed = JSON.parse(line); } catch (error) { errors.push("bad JSON line: " + line.slice(0, 60)); return null; }
-      const { op, error } = validator.validate(parsed);
+      const { op, error, notes } = validator.validate(parsed);
       if (error) errors.push(error);
+      for (const note of notes || []) errors.push(note);
       return op;
     }
     function consumeText(chunk, flush) {
@@ -474,39 +563,75 @@
       this.wordsPerSecond = o.wordsPerSecond || SPEECH_WORDS_PER_SECOND;
       this.reset();
     }
-    reset() { this.text = ""; this.messageAt = null; this.startedAt = null; this.endedAt = null; this.chars = []; this.times = []; this.updates = 0; this.cache = new Map(); }
+    reset() { this.text = ""; this.messageAt = null; this.startedAt = null; this.endedAt = null; this.chunks = []; this.chars = []; this.times = []; this.updates = 0; this.cache = new Map(); }
     setText(text, now) { this.text = String(text || ""); this.cache.clear(); if (this.messageAt == null && this.text) this.messageAt = now; }
     start(now) { if (this.startedAt == null) this.startedAt = now; this.endedAt = null; }
     end(now) { this.endedAt = now; }
-    /** A chunk of aligned speech began playing at `now`. startsMs = each character's start offset in the chunk, if known. */
-    aligned(text, startsMs, now) {
+    /**
+     * A chunk of aligned speech began playing at `now`. startsMs = each character's start offset in the chunk, if known.
+     * eventId orders chunks: a chunk that arrives late (lower id than one already received) is put back in its place,
+     * so the spoken text is never scrambled.
+     */
+    aligned(text, startsMs, now, eventId) {
       const chars = Array.from(String(text || ""));
       const usable = Array.isArray(startsMs) && startsMs.length === chars.length && startsMs.every((v, i) => Number.isFinite(v) && (i === 0 || v >= startsMs[i - 1]));
-      chars.forEach((ch, i) => { this.chars.push(ch); this.times.push(now + (usable ? startsMs[i] : 0)); });
+      this.chunks.push({ eventId: Number.isFinite(eventId) ? eventId : null, chars, times: chars.map((_, i) => now + (usable ? startsMs[i] : 0)) });
+      const ordered = this.chunks.every((c) => c.eventId !== null) ? [...this.chunks].sort((x, y) => x.eventId - y.eventId) : this.chunks;
+      this.chars = ordered.flatMap((c) => c.chars); this.times = ordered.flatMap((c) => c.times);
       this.updates++;
       if (this.startedAt == null) this.startedAt = now;
     }
     get hasAlignment() { return this.updates > 0; }
     estimateMs(prefix) { return Math.round((String(prefix).trim().split(/\s+/).filter(Boolean).length / this.wordsPerSecond) * 1000); }
 
-    /** { ready, reason, waitMs } for a cue at time `now`. */
-    evaluate(cue, now) {
-      if (!cue) return { ready: true, reason: "no-cue" };
+    /**
+     * { ready, reason, waitMs } for a step at time `now`.
+     * `cue` is where the idea is introduced: the step starts then. `ref` (optional) is where the teacher REFERS to what
+     * the step draws: the step must be finished by then, so it may start earlier, `refLeadMs` (how long it takes)
+     * before that phrase. The earlier of the two moments releases the step.
+     */
+    evaluate(cue, now, options) {
+      const o = options || {}, ref = o.ref;
+      if (!cue && !ref) return { ready: true, reason: "no-cue" };
       if (this.endedAt != null) return { ready: true, reason: "speech-ended" };
+      const results = [];
+      if (cue) results.push(this.phrase(cue, now, 0));
+      if (ref) { const r = this.phrase(ref, now, Math.max(0, o.refLeadMs || 0)); if (r.ready !== null) r.reason = "ref:" + r.reason; results.push(r); }
+      const ready = results.find((r) => r.ready === true);
+      if (ready) return ready;
+      const waiting = results.filter((r) => r.ready === false);
+      if (waiting.length) return { ready: false, reason: waiting[0].reason, waitMs: Math.min(...waiting.map((r) => r.waitMs)) };
+      return { ready: true, reason: "cue-not-found" };
+    }
+
+    /** One phrase: ready true/false, or ready null if it cannot be found anywhere (so it says nothing). */
+    phrase(cue, now, extraLeadMs) {
+      const lead = this.leadMs + extraLeadMs;
       if (this.updates > 0) { // exact: the words are in the speech that is playing
         const spoken = this.chars.join(""), found = locateCue(spoken, cueWords(cue).slice(0, 2).join(" "));
         if (found) {
-          const at = this.times[Array.from(spoken.slice(0, found.start)).length] - this.leadMs;
+          const at = this.times[Array.from(spoken.slice(0, found.start)).length] - lead;
           return now >= at ? { ready: true, reason: "aligned" } : { ready: false, reason: "aligned-soon", waitMs: at - now };
         }
       }
-      if (!this.cache.has(cue)) this.cache.set(cue, locateCue(this.text, cue));
-      const where = this.cache.get(cue);
-      if (!where) return { ready: true, reason: "cue-not-found" };
+      const where = this.where(cue);
+      if (!where) return { ready: null, reason: "cue-not-found" };
       const base = this.startedAt != null ? this.startedAt : this.messageAt != null ? this.messageAt + 800 : null;
       if (base == null) return { ready: false, reason: "waiting-for-speech", waitMs: 200 };
-      const due = base + this.estimateMs(this.text.slice(0, where.start)) - this.leadMs + (this.updates > 0 ? this.graceMs : 0);
+      const due = base + this.estimateMs(this.text.slice(0, where.start)) - lead + (this.updates > 0 ? this.graceMs : 0);
       return now >= due ? { ready: true, reason: this.updates > 0 ? "estimate-after-grace" : "estimate" } : { ready: false, reason: "estimate-wait", waitMs: due - now };
+    }
+    where(cue) { if (!this.cache.has(cue)) this.cache.set(cue, locateCue(this.text, cue)); return this.cache.get(cue); }
+
+    /** When (on the same clock as `now`) does the teacher start saying this phrase? null if unknown. Used to measure lateness. */
+    timeOf(phrase) {
+      if (!phrase) return null;
+      if (this.updates > 0) {
+        const spoken = this.chars.join(""), found = locateCue(spoken, cueWords(phrase).slice(0, 2).join(" "));
+        if (found) return this.times[Array.from(spoken.slice(0, found.start)).length];
+      }
+      const where = this.where(phrase), base = this.startedAt != null ? this.startedAt : this.messageAt != null ? this.messageAt + 800 : null;
+      return where && base != null ? base + this.estimateMs(this.text.slice(0, where.start)) : null;
     }
   }
 
@@ -527,6 +652,31 @@
       pending() { return held.length; },
       whenReleased() { return settled; },
     };
+  }
+
+  /**
+   * Phrases in the teacher's words that refer to something VISIBLE ("look at the vertex", "this point", "as you can
+   * see", "the curve I just drew"). Whatever they refer to has to be on the board by the time they are spoken, so the
+   * planner is told about them. Returns up to 4 short phrases.
+   */
+  function findReferences(text) {
+    const patterns = [
+      /\b(?:look at|take a look at|have a look at|see|notice|observe|check)\s+(?:the|this|that|these|those|my|our)\s+(?:[\p{L}\p{N}'-]+\s*){1,4}/giu,
+      /\bas you can see\b/giu,
+      /\b(?:this|that|these|those|right here|here is|here's)\s+(?:point|line|curve|arrow|equation|term|graph|diagram|box|circle|step|part|angle|axis|shape|label|number|value|triangle|parabola)s?\b/giu,
+      /\b(?:i|we)\s+(?:just\s+)?(?:drew|wrote|marked|circled|added|put)\b[^.?!]{0,30}/giu,
+    ];
+    const found = [];
+    for (const pattern of patterns) for (const match of String(text || "").matchAll(pattern)) {
+      const words = match[0].trim().split(/\s+/).slice(0, 6).join(" ").replace(/[,.;:!?]+$/, "");
+      if (words && !found.some((f) => f.toLowerCase() === words.toLowerCase())) found.push(words);
+    }
+    return found.slice(0, 4);
+  }
+  /** Does the teacher's turn end with a question to the student? Then the board must not give away the answer. */
+  function endsWithQuestion(text) {
+    const sentences = String(text || "").trim().split(/(?<=[.!?])\s+/);
+    return /\?\s*["')]*$/.test(sentences[sentences.length - 1] || "");
   }
 
   /** What the validator needs to know, when the caller has only a notebook summary. */
@@ -554,7 +704,7 @@
   return {
     BOARD, COLORS, SIZES, SHAPES, OPS, LIMITS, PLANNER_MODEL, PLANNER_SYSTEM,
     compileExpression, createValidator, validatePlan, buildPlannerMessage, summariseNotebook, deriveContext, planBoardStream,
-    locateCue, SpeechClock, createOrderedDelivery, SIDES, PAGE_KEYWORDS,
+    locateCue, findReferences, endsWithQuestion, SpeechClock, createOrderedDelivery, MOMENTS, SIDES, PAGE_KEYWORDS,
     estimateSpeechMs, normalizeSpeech, cueSpoken, niceTicks,
   };
 });
