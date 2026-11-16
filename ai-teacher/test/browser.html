@@ -458,6 +458,27 @@ async function runSelfTest() {
     await sleep(300); wb.cancelPending(); await wb.idle(); const countAtCut = ids(wb).length; await sleep(1500);
     check("audio interrupted: the steps that were waiting for words never spoken are discarded (no outdated drawing)", ids(wb).length === countAtCut && !wb.items.has("s3"), ids(wb).join(","));
 
+    /* 8e. PENCIL VS VOICE: the pencil's real duration is measured against the voice, whatever the subject */
+    const deriv = F.derivative.turns;
+    // (1) the first turn introduces the example, writes the function while it is named, then asks and waits
+    wb = fresh({ timeScale: 8, clock: new core.SpeechClock({ wordsPerSecond: 3 }) });
+    wb.beginTurn(deriv[0].teacher); wb.speechStart(); wb.enqueue(ops(deriv[0].ops, wb)); await wb.idle();
+    check("pace (1) example: the function is written, the question ends the turn and nothing else is drawn", wb.items.has("fx") && wb.items.size === 1 && wb.waiting === true, "items " + [...wb.items.keys()] + " waiting " + wb.waiting);
+    const fxStep = wb.timeline.find((t) => t.id === "fx");
+    check("pace (1) example: the pencil's real writing time was measured", fxStep && fxStep.penMs > 0 && wb.penStats.steps === 1, JSON.stringify(fxStep));
+    // (2) a fast voice and a slow pencil: the voice moves on to the next idea before the pencil is done, and that is MEASURED
+    wb = fresh({ timeScale: 0.5, clock: new core.SpeechClock({ wordsPerSecond: 7 }) });
+    wb.beginTurn(deriv[1].teacher); wb.speechStart(); wb.enqueue(ops(deriv[1].ops, wb)); await wb.idle();
+    const slowPen = wb.pacing();
+    check("pace (2) fast voice, slow pencil: all three steps written, and the voice running ahead of the pencil is detected and measured", slowPen.steps === 3 && slowPen.behind >= 1 && slowPen.worstWordsAhead >= 1 && slowPen.penRatio > 0, JSON.stringify(slowPen));
+    check("pace (2) fast voice, slow pencil: the planner is told to write fewer, shorter steps next time", core.pacingNote(slowPen).includes("fewer and shorter"), core.pacingNote(slowPen));
+    // (3) a slower voice and a quick pencil: it keeps up, and is not reported as behind
+    wb = fresh({ timeScale: 8, clock: new core.SpeechClock({ wordsPerSecond: 2 }) });
+    wb.beginTurn(deriv[1].teacher); wb.speechStart(); wb.enqueue(ops(deriv[1].ops, wb)); await wb.idle();
+    const kept = wb.pacing();
+    check("pace (3) the pencil keeps up: not reported as behind", kept.steps === 3 && kept.behind === 0 && core.pacingNote(kept).includes("kept up"), JSON.stringify(kept));
+    check("pace (3) the equations are written in the order the teacher says them, one per idea", ["d1", "d2", "d3"].every((id, i, a) => i === 0 || wb.timeline.find((t) => t.id === id).startedAt >= wb.timeline.find((t) => t.id === a[i - 1]).finishedAt - 5), "");
+
     /* 8d. A long lesson of DIAGRAMS: several pages, every diagram clean and readable */
     wb = fresh({ timeScale: 90 });
     const longD = F.longDiagrams(9);

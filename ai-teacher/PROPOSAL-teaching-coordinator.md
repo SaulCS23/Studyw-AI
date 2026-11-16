@@ -57,3 +57,17 @@ You teach with a whiteboard that writes by hand while you speak. Whatever you sa
 ## What I need from you
 - Approval to apply **B** to your agent (or to supply a copy of the agent's current prompt so I can merge it properly), and/or
 - Approval to design **C** (an agent tool) once the measurements are in.
+
+## Update: speech pace against handwriting (what can and cannot be done)
+
+**What the page can do without touching the agent**
+- It cannot pause, slow or hold live speech. The ElevenLabs SDK gives the page no such control; the voice speed is an agent setting, and nothing here changes it.
+- It can start the pencil a little early (at most 0.8 s) for long writing, hurry the pencil slightly when it keeps falling behind, and write one idea per step with a cue on the words that introduce it.
+- It now **measures the pencil**: real writing time against the planned time, and whether the voice had already reached the next idea before the pencil finished (in ms and words). Logged as `The voice had moved on to ...` and `Pencil so far: ...`.
+- It feeds those measurements to the planner (`Pacing:` note), so a pencil that keeps falling behind gets fewer, shorter steps, and one that keeps up is left alone.
+- It sends the agent **session-only context messages** (`sendContextualUpdate`): a teaching-style note when the lesson starts (introduce first, one step at a time, say it before writing it, ask and wait) and a board status after each turn. These never edit the saved agent, never interrupt speech, and only shape what the agent says next. Setup has a Teaching hints on/off switch.
+
+**What still needs your approval (not done)**
+1. Option B above (a permanent prompt addition on the agent), now that the session-only version exists to compare against.
+2. A slower or varied voice speed in the agent settings. It would be a fixed change for every sentence, which is what you asked us not to do.
+3. Smallest architecture that really coordinates speech and pencil: option C. The agent's own LLM emits board steps as a client tool in the same order as its words, and the page releases the next spoken step only after the pencil reports done (the agent would be told by tool result "written" before it continues). It still cannot stop audio already generated, so it needs a prompt that makes the agent speak in short steps and wait for each tool result. Needs an agent change, so it waits for your approval.

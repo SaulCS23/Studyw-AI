@@ -53,3 +53,6 @@ The Setup window also has the teacher's system prompt and first message, ready t
 This is a prototype for one person on their own laptop. For the public site:
 - The Anthropic key must move to the server (the browser should never hold it).
 - The ElevenLabs agent should be private, with the server handing out a short-lived signed URL per lesson, so nobody can use our minutes from outside the site.
+
+## Pencil against voice (pacing)
+The board measures the pencil: real writing time against planned, and whether the voice reached the next idea before the pencil finished (console: `The voice had moved on to ...`, `Pencil so far: ...`). The planner gets a `Pacing:` note from those numbers. Long writing starts up to 0.8 s early. Setup > Teaching hints (on by default) sends the agent session-only context messages (style note at the start, board status after each turn); it never edits the agent and cannot slow or pause speech that is playing. Tests: core.test.js (pacing), browser.html section 8e, integration.mjs 6g (d2).

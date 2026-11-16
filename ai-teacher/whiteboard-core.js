@@ -394,6 +394,7 @@
     "Notebook: pages p1, p2, ... Start a new page (new_page) when the teacher begins a new topic or section, or when the summary says the live page is nearly full. Never erase a page to change topic. To refer back: go_to_page, then point_to the element, then go_to_page latest. Point and highlight only at things listed in the summary, including diagram nodes. Add to the notebook; never redraw what is there.",
     "Math (kind=math) is LaTeX, supported: + - = < > ( ) [ ] / digits, letters, ^ and _ for powers and indices, \\frac{a}{b}, \\sqrt{x}, \\sqrt[3]{x}, \\sum_{i=1}^{n}, \\int_a^b, \\lim_{x \\to 0}, \\sin \\cos \\tan \\log \\ln, \\pm \\times \\cdot \\div \\leq \\geq \\neq \\approx \\infty \\to \\rightarrow \\Rightarrow \\circ \\partial \\nabla, Greek (\\alpha \\beta \\pi \\theta \\Delta ...), \\vec{v} \\bar{x} \\hat{x}, \\text{words}, \\left( \\right). No matrices, \\begin{...}, tables or colors inside LaTeX: write separate lines instead. Chemistry as math, e.g. H_2O.",
     "Text may be in the language the teacher speaks, using Latin letters with accents. Graphs: plot with explicit * and ^ (2*x+1, sin(x), x^2).",
+    "Teach like a patient human at a board: the voice says what is about to be written, the pen writes it while the voice goes on with that same idea, and the next idea waits for the next step. Write ONE idea per step and give each its own cue (the words that introduce it); never put several solution steps under one cue, and never draw a step whose words the teacher has not reached. A pen is slower than a voice: about 3 to 6 seconds for an equation. If the teacher narrates more steps than can be written, write the key expressions, not everything, and leave later steps to the next turn. If the teacher is only introducing an example verbally, draw nothing yet (speak_only). Keep writing short: key terms and the equation, not the sentence around it.",
     "Give the first step quickly: the pen starts as soon as your first line arrives.",
   ].join("\n");
 
@@ -416,7 +417,19 @@
   }
 
   /** The user message for the planner. Only the last few turns are sent, to keep tokens and latency low. */
-  function buildPlannerMessage(turns, notebook, hint, handled, partial) {
+  /**
+   * What the pencil has actually been doing, in words for the planner: closed-loop pacing, so a pen that keeps falling
+   * behind the voice gets fewer, shorter steps, and one that keeps up is not slowed down for no reason.
+   * pen = { steps, behind, worstWordsAhead, penRatio } (see Whiteboard.pacing()).
+   */
+  function pacingNote(pen) {
+    if (!pen || !pen.steps) return "";
+    const ratio = pen.penRatio ? " The pencil has been taking " + pen.penRatio.toFixed(1) + "x its estimated time." : "";
+    if (pen.behind >= 2 || pen.worstWordsAhead >= 12) return "Pacing: in this lesson the voice has often run ahead of the pencil (" + pen.behind + " of " + pen.steps + " steps, up to " + pen.worstWordsAhead + " words ahead)." + ratio + " Write fewer and shorter steps, one idea each, and give each a cue on the words that INTRODUCE it, not the words that finish it.";
+    return "Pacing: the pencil has kept up with the voice so far (" + pen.steps + " steps)." + ratio + " Keep one idea per step.";
+  }
+
+  function buildPlannerMessage(turns, notebook, hint, handled, partial, pen) {
     const recent = (turns || []).slice(-6).map((t) => (t.role === "teacher" ? "Teacher: " : "Student: ") + String(t.text).slice(0, 500));
     const lastTeacher = [...(turns || [])].reverse().find((t) => t.role === "teacher"), said = lastTeacher ? String(lastTeacher.text) : "";
     const references = findReferences(said);
@@ -424,6 +437,7 @@
     if (references.length) notes.push("Visual references in the teacher's words (each needs a step with \"ref\" that makes it exist in time): " + references.map((r) => '"' + r + '"').join(", ") + ".");
     // (an early plan sees only the first sentence: a rhetorical opener is not the end of the turn, so no question note then)
     if (!partial && endsWithQuestion(said)) notes.push("The teacher's turn ends with a question to the student: draw only what the question needs, never the answer, and end with a wait moment.");
+    const pacing = pacingNote(pen); if (pacing) notes.push(pacing);
     const request = hint ? "\n\nThe teacher also asked for this to be shown on the board (draw it step by step, shorter if it is long): " + clip(hint, 600) : "";
     const continued = handled ? "\n\nThe start of the teacher's latest turn is already on the board: \"" + clip(handled, 300) + "\". Only plan what comes after it." : "";
     return "Notebook:\n" + summariseNotebook(notebook) + "\n\nConversation (oldest first):\n" + recent.join("\n") + (notes.length ? "\n\n" + notes.join("\n") : "") + continued + request;
@@ -435,14 +449,14 @@
    * Resolves to { ops, errors, usage } when the stream ends. Throws on network or auth problems (error.status is set
    * for HTTP errors) so the caller can fall back to the classic board; an aborted request throws an AbortError.
    */
-  async function planBoardStream({ apiKey, turns, notebook, context, hint, handled, partial, fetchImpl, signal, model, onOps }) {
+  async function planBoardStream({ apiKey, turns, notebook, context, hint, handled, partial, pen, fetchImpl, signal, model, onOps }) {
     const doFetch = fetchImpl || fetch;
     const response = await doFetch("https://api.anthropic.com/v1/messages", {
       method: "POST", signal,
       headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
       body: JSON.stringify({
         model: model || PLANNER_MODEL, max_tokens: 1200, stream: true, system: PLANNER_SYSTEM,
-        messages: [{ role: "user", content: buildPlannerMessage(turns, notebook, hint, handled, partial) }],
+        messages: [{ role: "user", content: buildPlannerMessage(turns, notebook, hint, handled, partial, pen) }],
       }),
     });
     if (!response.ok) { const error = new Error("Planner request failed: " + response.status); error.status = response.status; throw error; }
@@ -595,7 +609,7 @@
       if (!cue && !ref) return { ready: true, reason: "no-cue" };
       if (this.endedAt != null) return { ready: true, reason: "speech-ended" };
       const results = [];
-      if (cue) results.push(this.phrase(cue, now, 0));
+      if (cue) results.push(this.phrase(cue, now, Math.max(0, o.cueLeadMs || 0))); // a long piece of writing starts a little early
       if (ref) { const r = this.phrase(ref, now, Math.max(0, o.refLeadMs || 0)); if (r.ready !== null) r.reason = "ref:" + r.reason; results.push(r); }
       const ready = results.find((r) => r.ready === true);
       if (ready) return ready;
@@ -622,6 +636,27 @@
       return now >= due ? { ready: true, reason: this.updates > 0 ? "estimate-after-grace" : "estimate" } : { ready: false, reason: "estimate-wait", waitMs: due - now };
     }
     where(cue) { if (!this.cache.has(cue)) this.cache.set(cue, locateCue(this.text, cue)); return this.cache.get(cue); }
+
+    /**
+     * How many words has the teacher spoken since she started this phrase, at time `now`? From the audio alignment when
+     * there is any, otherwise estimated from the time elapsed. null if the phrase's time is unknown. Used to measure
+     * "the teacher explained N words before the pencil had written it".
+     */
+    wordsSince(phrase, now) {
+      const at = this.timeOf(phrase);
+      if (at == null || now <= at) return at == null ? null : 0;
+      if (this.updates > 0 && this.times.length) {
+        let words = 0, inWord = false;
+        for (let i = 0; i < this.chars.length; i++) {
+          if (this.times[i] < at || this.times[i] > now) { inWord = false; continue; }
+          const letter = /[\p{L}\p{N}]/u.test(this.chars[i]);
+          if (letter && !inWord) words++;
+          inWord = letter;
+        }
+        return words;
+      }
+      return Math.round(((now - at) / 1000) * this.wordsPerSecond);
+    }
 
     /** When (on the same clock as `now`) does the teacher start saying this phrase? null if unknown. Used to measure lateness. */
     timeOf(phrase) {
@@ -679,6 +714,19 @@
     return /\?\s*["')]*$/.test(sentences[sentences.length - 1] || "");
   }
 
+  /**
+   * Text for the agent's own LLM, sent as a CONTEXTUAL UPDATE during the session (it never changes the agent's saved
+   * configuration and never interrupts speech). It can only shape what the agent says NEXT: the voice that is already
+   * playing cannot be slowed or paused from here.
+   */
+  const TEACHING_STYLE_NOTE = "Whiteboard teaching style for this session: you teach with a whiteboard that is written by hand while you speak, and handwriting is slower than speech. Introduce an example out loud first. Then say what you are about to write and keep talking about that one thing while it is written. Explain ONE step at a time, in one or two short sentences, then wait or ask a short question before the next step. Do not refer to an equation, point or graph as visible until you have said you are writing it. Name things (the minus four, the vertex) instead of saying this or here. After a question, stop and let the student answer. Stay conversational and natural; do not slow your voice down.";
+  function boardStatusNote(notebook, pen) {
+    const live = notebook && notebook.pages && notebook.pages.find((p) => p.id === notebook.live);
+    const items = live ? live.items.filter((i) => i.text).slice(-6).map((i) => '"' + clip(i.text, 40) + '"') : [];
+    const lag = pen && pen.steps && (pen.behind >= 2 || pen.worstWordsAhead >= 12) ? " The pencil has been writing slower than you speak, so say less per step and give it time." : "";
+    return "Board status: " + (items.length ? "written so far: " + items.join(", ") + "." : "nothing written yet.") + lag;
+  }
+
   /** What the validator needs to know, when the caller has only a notebook summary. */
   function deriveContext(notebook) {
     const context = { ids: [], graphs: [], groups: {}, pages: [] };
@@ -704,7 +752,7 @@
   return {
     BOARD, COLORS, SIZES, SHAPES, OPS, LIMITS, PLANNER_MODEL, PLANNER_SYSTEM,
     compileExpression, createValidator, validatePlan, buildPlannerMessage, summariseNotebook, deriveContext, planBoardStream,
-    locateCue, findReferences, endsWithQuestion, SpeechClock, createOrderedDelivery, MOMENTS, SIDES, PAGE_KEYWORDS,
+    locateCue, findReferences, endsWithQuestion, pacingNote, boardStatusNote, TEACHING_STYLE_NOTE, SpeechClock, createOrderedDelivery, MOMENTS, SIDES, PAGE_KEYWORDS,
     estimateSpeechMs, normalizeSpeech, cueSpoken, niceTicks,
   };
 });

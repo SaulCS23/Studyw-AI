@@ -651,3 +651,50 @@ test("early plan: a question in the first sentence is not treated as the end of 
   assert.ok(!core.buildPlannerMessage([{ role: "teacher", text: "Where will it land?" }], nb, "", null, true).includes("ends with a question"), "but an early plan (partial turn) does not");
   assert.ok(!core.buildPlannerMessage(turns, nb).includes("ends with a question"), "the full turn does not end with a question");
 });
+
+/* ---------- pacing: pencil against voice, hints for planner and agent ---------- */
+
+test("clock.wordsSince counts the words spoken since a phrase (from alignment, or estimated)", () => {
+  const clock = new core.SpeechClock({ wordsPerSecond: 2 });
+  clock.setText("Let's start with x cubed. Then sine of x.", 0); clock.start(0);
+  assert.equal(clock.wordsSince("Let's start", 0), 0);
+  assert.equal(clock.wordsSince("Let's start", 3000), 6, "estimated: 2 words a second for 3 s");
+  const aligned = new core.SpeechClock(); const text = "one two three four", times = Array.from(text, (_, i) => i * 100);
+  aligned.setText(text, 0); aligned.aligned(text, times, 1000, 1);
+  assert.equal(aligned.wordsSince("two three", 1000 + 1400), 3, "two, three and four have all started by 1400 ms after the start");
+  assert.equal(aligned.wordsSince("two three", 1000 + 500), 1, "only two has started 100 ms into the phrase");
+  assert.equal(aligned.wordsSince("missing words", 5000), null);
+});
+
+test("clock: a long write step may start a little early (cueLeadMs), never before that", () => {
+  const clock = new core.SpeechClock({ wordsPerSecond: 2, leadMs: 0 });
+  clock.setText("Intro words here. Now the equation.", 0); clock.start(0);
+  const at = clock.estimateMs("Intro words here. ");
+  assert.equal(clock.evaluate("Now the equation", at - 600, {}).ready, false);
+  assert.equal(clock.evaluate("Now the equation", at - 600, { cueLeadMs: 800 }).ready, true);
+  assert.equal(clock.evaluate("Now the equation", at - 1000, { cueLeadMs: 800 }).ready, false);
+});
+
+test("pacingNote: tells the planner what the pencil really did, in both directions", () => {
+  assert.equal(core.pacingNote(null), "");
+  assert.equal(core.pacingNote({ steps: 0 }), "");
+  const behind = core.pacingNote({ steps: 5, behind: 3, worstWordsAhead: 14, penRatio: 1.3 });
+  assert.ok(behind.includes("run ahead of the pencil") && behind.includes("fewer and shorter") && behind.includes("1.3x"), behind);
+  assert.ok(core.pacingNote({ steps: 4, behind: 0, worstWordsAhead: 0, penRatio: 1 }).includes("kept up"));
+  const nb = { live: "p1", pages: [{ id: "p1", title: "", free: 1, items: [] }] };
+  assert.ok(core.buildPlannerMessage([{ role: "teacher", text: "Hi there." }], nb, "", null, false, { steps: 5, behind: 3, worstWordsAhead: 14, penRatio: 1 }).includes("fewer and shorter"));
+  assert.ok(!core.buildPlannerMessage([{ role: "teacher", text: "Hi there." }], nb).includes("Pacing:"), "no measurements, no pacing note");
+});
+
+test("planner prompt teaches one idea per step, the pen being slower than the voice, and verbal introductions", () => {
+  for (const phrase of ["ONE idea per step", "A pen is slower than a voice", "introducing an example verbally", "never draw a step whose words the teacher has not reached"]) assert.ok(core.PLANNER_SYSTEM.includes(phrase), phrase);
+});
+
+test("agent notes: the board status lists what is written; the style note never claims to slow speech", () => {
+  const nb = { live: "p1", pages: [{ id: "p1", title: "", free: 0.5, items: [{ id: "a", type: "write", text: "f(x) = x^3" }, { id: "b", type: "graph" }] }] };
+  const status = core.boardStatusNote(nb, { steps: 3, behind: 2, worstWordsAhead: 3 });
+  assert.ok(status.includes('"f(x) = x^3"') && status.includes("slower than you speak"), status);
+  assert.ok(core.boardStatusNote({ live: "p1", pages: [{ id: "p1", items: [] }] }, null).includes("nothing written yet"));
+  assert.ok(/one step at a time/i.test(core.TEACHING_STYLE_NOTE) && /do not slow your voice/i.test(core.TEACHING_STYLE_NOTE));
+  assert.ok(!/pause (your|the) voice/i.test(core.TEACHING_STYLE_NOTE));
+});

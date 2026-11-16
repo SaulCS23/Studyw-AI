@@ -157,6 +157,9 @@ The student can see a whiteboard next to you. Whatever you explain gets sketched
       <li>Planner speed: the whiteboard asks Claude what to draw after each teacher turn. <b>Smarter</b> (Sonnet 5.5) plans best; <b>Faster</b> (Haiku 5.5) starts writing sooner.
         <label for="plannerModel" style="margin-top:6px">Whiteboard planner<select id="plannerModel"><option value="claude-sonnet-5-5">Smarter (Sonnet 5.5)</option><option value="claude-haiku-5-5">Faster (Haiku 5.5)</option></select></label>
       </li>
+      <li>Teaching-style hints: during the lesson the page tells the teacher (as a message in this session only) to introduce an example, explain one step at a time, and what is on the board. <b>Your agent's saved settings are never changed</b>, and this cannot slow or pause a voice that is already speaking; it only shapes what the teacher says next.
+        <label for="teachHints" style="margin-top:6px">Teaching hints<select id="teachHints"><option value="on">On</option><option value="off">Off</option></select></label>
+      </li>
       <li>Choose how the whiteboard draws. <b>Animated</b> writes and draws step by step while the teacher talks and adds to what is already on the board. <b>Classic</b> replaces the board with a finished sketch after each turn.
         <label for="boardStyle" style="margin-top:6px">Whiteboard style<select id="boardStyle"><option value="animated">Animated (writes as the teacher talks)</option><option value="classic">Classic (whole sketch at once)</option></select></label>
       </li>
@@ -185,8 +188,8 @@ const $ = id => document.getElementById(id);
 const app = $("app"), boardEl = $("board"), captionEl = $("caption"), statusEl = $("status");
 let convo = null;
 
-try { $("agentId").value = localStorage.getItem("ttl-agent") || ""; $("anthropicKey").value = localStorage.getItem("ttl-akey") || ""; $("boardStyle").value = localStorage.getItem("ttl-board") === "classic" ? "classic" : "animated"; $("plannerModel").value = localStorage.getItem("ttl-wbmodel") === "claude-haiku-5-5" ? "claude-haiku-5-5" : "claude-sonnet-5-5"; } catch(e){}
-$("setup").addEventListener("close", () => { try { localStorage.setItem("ttl-agent", $("agentId").value.trim()); localStorage.setItem("ttl-akey", $("anthropicKey").value.trim()); localStorage.setItem("ttl-board", $("boardStyle").value); localStorage.setItem("ttl-wbmodel", $("plannerModel").value); } catch(e){} refreshBadge(); });
+try { $("agentId").value = localStorage.getItem("ttl-agent") || ""; $("anthropicKey").value = localStorage.getItem("ttl-akey") || ""; $("boardStyle").value = localStorage.getItem("ttl-board") === "classic" ? "classic" : "animated"; $("plannerModel").value = localStorage.getItem("ttl-wbmodel") === "claude-haiku-5-5" ? "claude-haiku-5-5" : "claude-sonnet-5-5"; $("teachHints").value = localStorage.getItem("ttl-hints") === "off" ? "off" : "on"; } catch(e){}
+$("setup").addEventListener("close", () => { try { localStorage.setItem("ttl-agent", $("agentId").value.trim()); localStorage.setItem("ttl-akey", $("anthropicKey").value.trim()); localStorage.setItem("ttl-board", $("boardStyle").value); localStorage.setItem("ttl-wbmodel", $("plannerModel").value); localStorage.setItem("ttl-hints", $("teachHints").value); } catch(e){} refreshBadge(); });
 $("openSetup").onclick = () => $("setup").showModal();
 $("saveSetup").onclick = () => { $("setup").close(); statusEl.textContent = $("agentId").value.trim() ? "Saved. Press Start lesson." : "Add your Agent ID in Setup to start."; };
 document.querySelectorAll("[data-copy]").forEach(b => b.onclick = async () => {
@@ -294,6 +297,18 @@ function reportSync(){
   const s = whiteboard.syncStats, released = Object.entries(s.released).map(([k, v]) => k + " " + v).join(", ");
   const line = "Sync so far: steps released by [" + (released || "none") + "]; spoken references checked " + s.refs + ", late " + s.lateRefs + (s.lateRefs ? " (worst " + s.worstLateMs + " ms)" : "") + ".";
   if (line !== lastSync){ lastSync = line; boardEvent("sync", s.lateRefs ? "warn" : "info", line); }
+  const pen = whiteboard.pacing();
+  if (pen.steps) boardEvent("pen", pen.behind ? "warn" : "info", "Pencil so far: " + pen.steps + " steps written, took " + pen.penRatio.toFixed(2) + "x the planned time; the voice had moved on before the pencil finished in " + pen.behind + (pen.behind ? " (worst " + pen.worstWordsAhead + " words, " + pen.worstBehindMs + " ms ahead)" : "") + ".");
+}
+/* Session-only messages to the agent's LLM (contextual updates). They never edit the agent's saved configuration, never
+   interrupt it, and cannot slow or pause speech that is already playing: they only shape what it says next. */
+function hintsOn(){ return $("teachHints").value === "on" && convo && typeof convo.sendContextualUpdate === "function"; }
+function sendHint(text, what){ if (!hintsOn()) return; try { convo.sendContextualUpdate(text); boardEvent("hint", "info", "Told the agent (this session only): " + what); } catch (error){ boardEvent("hint", "warn", "Could not send a hint to the agent: " + (error && error.message)); } }
+let statusTimer = null;
+function sendBoardStatus(){ // once the pencil has finished, tell the agent what is written so the next turn builds on it
+  if (!hintsOn() || !whiteboard) return;
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(async () => { const wb = whiteboard; if (!wb) return; await wb.idle(); sendHint(window.WhiteboardCore.boardStatusNote(wb.notebook(), wb.pacing()), "board status"); }, 400);
 }
 function abortPlans(){ for (const c of plans) c.abort(); plans.clear(); }
 function htmlToText(html){ // what the agent's own board HTML says, without drawing it
@@ -363,7 +378,7 @@ async function drawAnimatedBoard(options){
   boardEvent("planning", "info", "Asking Claude what to draw (" + transcript.length + " turns, " + board.summary().length + " items on " + board.state().pages.length + " page(s)" + (options.handled ? ", continuing a turn already started" : "") + (toolHint ? ", plus the agent's show_on_board request" : "") + ").");
   try {
     const result = await window.WhiteboardCore.planBoardStream({
-      apiKey: key, turns, notebook: board.notebook(), context: board.context(), hint: toolHint, handled: options.handled, partial: !!options.text && !options.handled, signal: abort.signal, model: $("plannerModel").value,
+      apiKey: key, turns, notebook: board.notebook(), context: board.context(), hint: toolHint, handled: options.handled, partial: !!options.text && !options.handled, signal: abort.signal, model: $("plannerModel").value, pen: board.pacing(),
       onOps: (ops) => { if (stale()) return; if (ordered) ordered.push(ops); else deliver(ops); },
     });
     if (ordered) await ordered.whenReleased(); // anything held back for the first part is delivered now
@@ -449,7 +464,7 @@ async function start(isRetry){
           return "The board now shows it.";
         }
       },
-      onConnect: () => { $("call").classList.add("live"); $("callWord").textContent = "End lesson"; setMode("listening"); },
+      onConnect: () => { $("call").classList.add("live"); $("callWord").textContent = "End lesson"; setMode("listening"); setTimeout(() => sendHint(window.WhiteboardCore.TEACHING_STYLE_NOTE, "teaching style (one step at a time, say it before writing it)"), 300); },
       onDisconnect: (d) => {
         if (!lastProblem && d && (d.reason === "error" || (!heardAgent && d.reason === "agent")))
           lastProblem = "Problem (" + connType + "): " + describe(d.message || ("closed by " + d.reason), { ...(d.context || {}), closeCode: d.closeCode, closeReason: d.closeReason });
@@ -470,7 +485,7 @@ async function start(isRetry){
           }
         } else if (wasSpeaking){
           clearTimeout(endTimer);
-          endTimer = setTimeout(() => { if (whiteboard){ whiteboard.speechEnd(); reportSync(); } turnOpen = false; }, 700);
+          endTimer = setTimeout(() => { if (whiteboard){ whiteboard.speechEnd(); reportSync(); sendBoardStatus(); } turnOpen = false; }, 700);
         }
         setMode(mode === "speaking" ? "speaking" : "listening");
       },

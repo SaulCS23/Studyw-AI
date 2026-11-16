@@ -142,6 +142,7 @@
       this.moments = [];             // teaching moments the planner has marked, for diagnostics and tests
       this.timeline = [];            // when each step was released, started and finished (ms on this.now()), for measuring sync
       this.syncStats = { released: {}, refs: 0, lateRefs: 0, worstLateMs: 0 };
+      this.penStats = { steps: 0, behind: 0, worstWordsAhead: 0, worstBehindMs: 0, actualMs: 0, expectedMs: 0 }; // what the pencil really did against the voice
       this.calcAnchors = new Map();  // calc name -> where the first line's "=" is, so later lines line up under it
       this.uid = 0;
       this.typesetCache = new Map();
@@ -328,10 +329,11 @@
           await this.waitForCue(entry);
           if (entry.generation !== this.generation) continue;
           this.current = { cancelled: false };
-          const startedAt = this.now();
-          try { await this.run(entry.op, this.paceFor(entry)); } catch (error) { this.log("warn", "A drawing step failed: " + (error && error.message) + " " + JSON.stringify(entry.op).slice(0, 120)); }
+          const startedAt = this.now(), pace = this.paceFor(entry);
+          entry.expectedMs = (this.naturalMs(entry.op) * pace) / this.timeScale;
+          try { await this.run(entry.op, pace); } catch (error) { this.log("warn", "A drawing step failed: " + (error && error.message) + " " + JSON.stringify(entry.op).slice(0, 120)); }
           this.current = null;
-          if (entry.generation === this.generation) this.recordStep(entry.op, startedAt, this.now());
+          if (entry.generation === this.generation) this.recordStep(entry.op, startedAt, this.now(), entry.expectedMs);
         }
       } finally {
         this.running = false; this.current = null;
@@ -344,9 +346,10 @@
      * Remember when a step ran, and, if the teacher's words REFER to what it drew ("look at the point"), measure how
      * late it was: the number that says whether the picture was ready when the teacher pointed at it.
      */
-    recordStep(op, startedAt, finishedAt) {
+    recordStep(op, startedAt, finishedAt, expectedMs) {
       const record = { op: op.op, id: op.id, cue: op.cue, ref: op.ref, startedAt, finishedAt };
       this.timeline.push(record); if (this.timeline.length > 200) this.timeline.shift();
+      this.measurePen(op, record, expectedMs);
       if (!op.ref) return;
       const spokenAt = this.clock.timeOf(op.ref);
       if (spokenAt == null) return;
@@ -359,6 +362,31 @@
     }
 
     /**
+     * Measure the pencil against the voice for one finished step: how long it really took against how long it was
+     * meant to, and, if the teacher had already reached the NEXT idea before this one was finished, how far ahead of
+     * the pencil the voice was (in ms and in words). These are measurements, not estimates of quality.
+     */
+    measurePen(op, record, expectedMs) {
+      if (!["write", "graph", "plot", "shape", "dframe", "dnode", "dlink", "correct"].includes(op.op)) return;
+      const stats = this.penStats, actual = record.finishedAt - record.startedAt;
+      stats.steps++; record.penMs = Math.round(actual);
+      if (expectedMs > 0) { stats.actualMs += actual; stats.expectedMs += expectedMs; }
+      const next = this.queue.find((e) => e.generation === this.generation && (e.op.cue || e.op.ref));
+      const nextAt = next ? this.clock.timeOf(next.op.cue || next.op.ref) : null;
+      if (nextAt == null || nextAt >= record.finishedAt) return;
+      const behindMs = Math.round(record.finishedAt - nextAt), words = this.clock.wordsSince(next.op.cue || next.op.ref, record.finishedAt) || 0;
+      if (behindMs < 700) return; // a moment's overlap is how a human talks and writes at once
+      stats.behind++; stats.worstBehindMs = Math.max(stats.worstBehindMs, behindMs); stats.worstWordsAhead = Math.max(stats.worstWordsAhead, words);
+      record.voiceAheadMs = behindMs; record.voiceAheadWords = words;
+      this.log("warn", `The voice had moved on to "${next.op.cue || next.op.ref}" (${words} words, ${behindMs} ms) before the pencil finished "${op.id || op.op}" (took ${record.penMs} ms).`);
+    }
+    /** The pencil's record so far, for the planner and the agent: { steps, behind, worstWordsAhead, penRatio }. */
+    pacing() {
+      const s = this.penStats;
+      return { steps: s.steps, behind: s.behind, worstWordsAhead: s.worstWordsAhead, worstBehindMs: s.worstBehindMs, penRatio: s.expectedMs > 0 ? s.actualMs / s.expectedMs : 0 };
+    }
+
+    /**
      * How fast to draw this step, as a multiplier on its natural duration (< 1 is faster). While the teacher is
      * still talking, the drawing is paced to finish about when the speech does, but never faster than 1.5x a
      * real hand or slower than 1.4x, so it neither appears all at once nor drags on.
@@ -368,7 +396,7 @@
       if (speechLeft == null) return 1;
       let queued = this.naturalMs(entry.op);
       for (const waiting of this.queue) if (waiting.generation === this.generation) queued += this.naturalMs(waiting.op);
-      const scale = clamp((Math.max(0, speechLeft) + 2500) / Math.max(1, queued), 0.65, 1.4);
+      const scale = clamp((Math.max(0, speechLeft) + 2500) / Math.max(1, queued), this.penStats.behind ? 0.55 : 0.65, 1.4); // a hand that keeps falling behind may hurry a little more, never by much
       return Number.isFinite(scale) ? scale : 1;
     }
 
@@ -382,10 +410,12 @@
       if (!cue && !ref) return;
       const started = this.now();
       // A step the teacher will REFER to must be finished by then: it is released early by however long it takes to draw.
+      // Long writing starts a little before its words, so the pen finishes about when the idea has been said (never more than 0.8 s early).
+      const cueLeadMs = entry.op.op === "write" ? clamp((this.naturalMs(entry.op) * this.paceFor(entry)) / this.timeScale * 0.3, 0, 800) : 0;
       const refLeadMs = ref ? (this.naturalMs(entry.op) * this.paceFor(entry)) / this.timeScale + 300 : 0;
       for (;;) {
         if (entry.generation !== this.generation) return;
-        const result = this.clock.evaluate(cue, this.now(), { ref, refLeadMs });
+        const result = this.clock.evaluate(cue, this.now(), { ref, refLeadMs, cueLeadMs });
         if (result.ready) {
           const info = { op: entry.op.op, id: entry.op.id, cue: cue || ref, reason: result.reason, waitedMs: Math.round(this.now() - started) };
           this.syncStats.released[result.reason] = (this.syncStats.released[result.reason] || 0) + 1;

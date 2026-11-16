@@ -31,7 +31,7 @@ const service = { delayMs: 0, plannerStatus: 200, planner: [], classic: [] }; //
 
 const elevenLabsStub = `export const Conversation = { async startSession(opts){ window.__opts = opts;
   setTimeout(() => opts.onConnect && opts.onConnect({}), 0);
-  return { endSession: async () => { opts.onDisconnect && opts.onDisconnect({ reason: "user" }); }, sendUserMessage(){}, sendUserActivity(){} }; } };`;
+  return { endSession: async () => { opts.onDisconnect && opts.onDisconnect({ reason: "user" }); }, sendUserMessage(){}, sendUserActivity(){}, sendContextualUpdate(t){ (window.__updates = window.__updates || []).push(t); } }; } };`;
 
 /** The text of a streamed Anthropic reply: server-sent events carrying text deltas. */
 function sse(text) {
@@ -429,6 +429,18 @@ try {
   await page("__opts.onModeChange({ mode: 'listening' }); true");
   await sleep(1100);
   check("sync report: the page reports how the writing kept up (references checked, late ones counted)", (await events("sync")).some((m) => m.startsWith("Sync so far:") && m.includes("spoken references checked")), JSON.stringify((await events("sync")).slice(-2)));
+  // (d2) Pencil measurements and session-only hints to the agent
+  await waitFor(async () => (await page("(window.__updates || []).some((t) => t.startsWith('Board status:'))")), "board status sent to the agent", 15000);
+  const updates = await page("window.__updates");
+  check("hints: the teaching style was sent to the agent as a session message (not a setting) when the lesson started", /one step at a time/i.test(updates[0]) && /do not slow your voice/i.test(updates[0]), String(updates[0]).slice(0, 120));
+  check("hints: after the pencil finished, the agent was told what is on the board", updates.some((t) => t.startsWith("Board status:") && t.includes("written so far")), JSON.stringify(updates.slice(-1)));
+  check("pencil: the page reports the pencil's real writing time against the voice", (await events("pen")).some((m) => m.startsWith("Pencil so far:") && m.includes("steps written")), JSON.stringify((await events("pen")).slice(-1)));
+  check("planner: later plans include what the pencil has actually done (pacing)", service.planner.at(-1).messages[0].content.includes("Pacing:"), service.planner.at(-1).messages[0].content.slice(-300));
+  await page("document.getElementById('teachHints').value = 'off'; window.__updates.length = 0; true");
+  await page("__opts.onModeChange({ mode: 'speaking' }); true"); await sleep(50); await page("__opts.onModeChange({ mode: 'listening' }); true");
+  await sleep(2500);
+  check("hints: switched off, nothing is sent to the agent", (await page("window.__updates.length")) === 0, String(await page("window.__updates.length")));
+  await page("document.getElementById('teachHints').value = 'on'; true");
   // (e) Audio events arriving out of order (by event id) are put back in speaking order
   await hear("Say that again, slowly.");
   await speak(fixtures.sentences.turns[0].teacher);

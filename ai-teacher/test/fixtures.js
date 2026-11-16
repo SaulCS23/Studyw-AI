@@ -168,6 +168,22 @@
     ] }],
   };
 
+  /** A worked example, one step at a time: introduce verbally, write while naming the parts, ask, then one step per idea. */
+  const derivative = {
+    subject: "derivative, step by step",
+    turns: [
+      { teacher: "Let's try an example. I'll write a function on the board. We have x cubed, plus sine of x. Now, how would we find its derivative?", ops: [
+        { op: "write", kind: "math", content: "f(x) = x^3 + \\sin(x)", id: "fx", calc: "d", cue: "I'll write a function" },
+        { op: "moment", kind: "wait", note: "the teacher asks the student" },
+      ] },
+      { teacher: "Let's start with x cubed. Using the power rule, we bring down the three and reduce the exponent by one. Now, the derivative of sine x is cosine x. Putting the two results together gives us the derivative.", ops: [
+        { op: "write", kind: "math", content: "\\frac{d}{dx}(x^3) = 3x^2", id: "d1", calc: "d", cue: "Using the power rule" },
+        { op: "write", kind: "math", content: "\\frac{d}{dx}(\\sin x) = \\cos x", id: "d2", calc: "d", cue: "the derivative of sine x" },
+        { op: "write", kind: "math", content: "f'(x) = 3x^2 + \\cos(x)", id: "d3", calc: "d", cue: "Putting the two results together" },
+      ] },
+    ],
+  };
+
   /** A rhetorical question that opens a turn which then goes on: the question must not freeze the rest of the turn. */
   const rhetorical = {
     subject: "rhetorical opener",
@@ -256,5 +272,5 @@
     };
   }
 
-  return { mathematics, biology, history, topicChange, revisit, sentences, speakOnly, writeWhileSaying, graphWithReference, pointAndExplain, question, questionAfterDrawing, rhetorical, missingReference, handwriting, longLesson, longDiagrams, all: [mathematics, biology, history, topicChange, handwriting] };
+  return { mathematics, biology, history, topicChange, revisit, sentences, speakOnly, writeWhileSaying, graphWithReference, pointAndExplain, question, questionAfterDrawing, rhetorical, derivative, missingReference, handwriting, longLesson, longDiagrams, all: [mathematics, biology, history, topicChange, handwriting] };
 });
