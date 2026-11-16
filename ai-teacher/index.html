@@ -6,9 +6,9 @@
 <title>Talking Teacher Live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=Kalam:wght@400;700&display=swap">
-<!-- Animated whiteboard: KaTeX writes the equations (pinned version + integrity hash); the two local scripts are the drawing engine. -->
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV" crossorigin="anonymous">
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js" integrity="sha384-XjKyOOlGwcjNTAIQHIpgOno0Hl1YQqzUOEleOLALmuqehneUG+vnGctmUb0ZY0l8" crossorigin="anonymous"></script>
+<!-- Animated whiteboard: a handwriting engine (stroke font + maths typesetter) and an SVG renderer. No external libraries. -->
+<script defer src="whiteboard-font.js"></script>
+<script defer src="whiteboard-hand.js"></script>
 <script defer src="whiteboard-core.js"></script>
 <script defer src="whiteboard.js"></script>
 <style>
@@ -34,6 +34,8 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);font
 .status{color:var(--muted);flex:1;min-width:0}
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:.85rem;padding:3px 10px;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+#boardBadge.warn{border-color:var(--danger);color:var(--danger);font-weight:700}
+#boardBadge.live{border-color:var(--accent);color:var(--accent)}
 [data-mode="listening"] .dot{background:var(--danger)}
 [data-mode="connecting"] .dot{background:var(--pencil)}
 [data-mode="speaking"] .dot{background:var(--accent)}
@@ -84,6 +86,7 @@ code{background:var(--bg);padding:1px 6px;border-radius:5px}
   <div class="top">
     <h1>Talking Teacher Live</h1>
     <span class="pill"><span class="dot"></span><span id="modeWord">Not started</span></span>
+    <span class="pill" id="boardBadge" role="status" title="Which whiteboard drew the latest turn. Details are in the browser console (Cmd+Option+J).">Board: Animated</span>
     <span class="status" id="status"></span>
     <button class="btn" id="openSetup" type="button">Setup</button>
   </div>
@@ -160,7 +163,7 @@ const app = $("app"), boardEl = $("board"), captionEl = $("caption"), statusEl =
 let convo = null;
 
 try { $("agentId").value = localStorage.getItem("ttl-agent") || ""; $("anthropicKey").value = localStorage.getItem("ttl-akey") || ""; $("boardStyle").value = localStorage.getItem("ttl-board") === "classic" ? "classic" : "animated"; } catch(e){}
-$("setup").addEventListener("close", () => { try { localStorage.setItem("ttl-agent", $("agentId").value.trim()); localStorage.setItem("ttl-akey", $("anthropicKey").value.trim()); localStorage.setItem("ttl-board", $("boardStyle").value); } catch(e){} });
+$("setup").addEventListener("close", () => { try { localStorage.setItem("ttl-agent", $("agentId").value.trim()); localStorage.setItem("ttl-akey", $("anthropicKey").value.trim()); localStorage.setItem("ttl-board", $("boardStyle").value); } catch(e){} refreshBadge(); });
 $("openSetup").onclick = () => $("setup").showModal();
 $("saveSetup").onclick = () => { $("setup").close(); statusEl.textContent = $("agentId").value.trim() ? "Saved. Press Start lesson." : "Add your Agent ID in Setup to start."; };
 document.querySelectorAll("[data-copy]").forEach(b => b.onclick = async () => {
@@ -168,6 +171,7 @@ document.querySelectorAll("[data-copy]").forEach(b => b.onclick = async () => {
   setTimeout(() => b.textContent = "Copy", 1500);
 });
 if (!$("agentId").value) $("setup").showModal();
+window.addEventListener("load", refreshBadge); // the whiteboard scripts are deferred: check them once everything has loaded
 
 function setMode(m){
   app.dataset.mode = m;
@@ -198,15 +202,47 @@ function showBoard(html){
 
 /* Animated whiteboard (ai-teacher/whiteboard.js). The classic board above stays as the fallback:
    it is used when "Classic" is chosen in Setup, when the engine fails to load, and when Claude's drawing
-   instructions can't be used. Drawn content is kept when switching back and forth. */
-const wbHost = $("wbBoard"); let whiteboard = null, turnStartedAt = 0;
-function useAnimatedBoard(){ return $("boardStyle").value === "animated" && !!(window.Whiteboard && window.WhiteboardCore); }
-function getWhiteboard(){ if (!whiteboard && window.Whiteboard && window.WhiteboardCore) whiteboard = new window.Whiteboard(wbHost); return whiteboard; }
+   steps can't be used. Drawn content is kept when switching back and forth.
+   Every decision is reported: in the console (prefix "[Whiteboard]", also kept in window.__whiteboardLog)
+   and in the "Board:" badge at the top, so a fallback never goes unnoticed. */
+const wbHost = $("wbBoard"), badgeEl = $("boardBadge");
+let whiteboard = null, turnStartedAt = 0, turnSpeechDone = true, planAbort = null, lastPlanStart = 0; // lastPlanStart: when this turn's drawing began (0 until it does; reset when the student speaks)
+let toolHint = "", lastToolHtml = "", toolAt = 0, toolTimer = null;
+const boardLog = window.__whiteboardLog = [];
+function setBadge(text, level){ badgeEl.textContent = "Board: " + text; badgeEl.className = "pill" + (level ? " " + level : ""); }
+function boardEvent(kind, level, message){
+  (console[level] || console.log)("[Whiteboard] " + message);
+  boardLog.push({ at: new Date().toISOString().slice(11, 23), kind, level, message }); if (boardLog.length > 200) boardLog.shift();
+}
+function engineReady(){ return !!(window.Whiteboard && window.WhiteboardCore && window.WhiteboardHand && window.WhiteboardFontData); }
+function useAnimatedBoard(){ return $("boardStyle").value === "animated" && engineReady(); }
+function refreshBadge(){
+  if ($("boardStyle").value === "classic") setBadge("Classic (chosen in Setup)");
+  else if (!engineReady()){ setBadge("Classic fallback: drawing engine did not load", "warn"); boardEvent("fallback", "error", "The animated whiteboard scripts did not load (whiteboard-*.js must sit next to index.html), so the classic board is used."); }
+  else setBadge("Animated");
+}
+function speechLeftMs(){
+  if (turnSpeechDone) return 0;
+  const lastTeacher = [...transcript].reverse().find(m => m.role === "teacher");
+  return Math.max(0, window.WhiteboardCore.estimateSpeechMs(lastTeacher ? lastTeacher.text : "") - (Date.now() - turnStartedAt));
+}
+function getWhiteboard(){
+  if (!whiteboard && engineReady()) whiteboard = new window.Whiteboard(wbHost, { speechLeftMs, log: (level, message) => boardEvent("engine", level, message) });
+  return whiteboard;
+}
 function showSurface(which){ boardEl.hidden = which !== "classic"; wbHost.hidden = which !== "animated"; }
-/* The student spoke or typed: stop outdated drawing, keep what is already on the board. */
+/* The student spoke or typed: stop outdated drawing and stop paying for a plan nobody needs, keep what is on the board. */
 function interruptBoard(){
   if (whiteboard) whiteboard.cancelPending();
-  if (useAnimatedBoard()){ boardReq++; clearTimeout(boardTimer); } // a plan still being written is out of date too
+  if (planAbort){ planAbort.abort(); planAbort = null; }
+  clearTimeout(toolTimer);
+  if (useAnimatedBoard()){ boardReq++; clearTimeout(boardTimer); }
+}
+function htmlToText(html){ // what the agent's own board HTML says, without drawing it
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("script,style").forEach(el => el.remove());
+  doc.querySelectorAll("p,li,h1,h2,h3,div,tr,br,text,tspan").forEach(el => el.append(" | "));
+  return doc.body.textContent.replace(/\s+/g, " ").trim();
 }
 
 /* Auto whiteboard: after each teacher turn, Claude sketches what was just explained. */
@@ -219,29 +255,53 @@ function noteMessage(role, text){
 }
 function scheduleBoard(){
   clearTimeout(boardTimer);
-  boardTimer = setTimeout(() => (useAnimatedBoard() ? drawAnimatedBoard() : drawBoard()), 400);
+  boardTimer = setTimeout(() => (useAnimatedBoard() ? drawAnimatedBoard() : drawBoard()), 250);
 }
-/* After each teacher turn, a separate Claude call returns drawing instructions (checked against a strict schema
-   in whiteboard-core.js), and the engine draws them step by step, paced to how long the teacher will keep talking. */
+function fallbackToClassic(reason){
+  boardEvent("fallback", "warn", "Classic fallback: " + reason);
+  setBadge("Classic fallback: " + reason, "warn");
+  statusEl.textContent = "Whiteboard: classic fallback (" + reason + ")";
+  if (toolHint && lastToolHtml) showBoard(lastToolHtml); // the agent's own board, as it asked for
+  else drawBoard();
+}
+/* A separate Claude call streams drawing steps (one JSON object per line, each checked against a strict schema in
+   whiteboard-core.js). Each step is handed to the pen as soon as it arrives, so writing starts after Claude's first
+   line, not after its last. */
 async function drawAnimatedBoard(){
   const key = $("anthropicKey").value.trim();
-  if (!key || toolUsedThisTurn) return;
+  if (!key){ boardEvent("planner", "warn", "No Anthropic API key in Setup, so the whiteboard cannot draw."); setBadge("no Anthropic key", "warn"); return; }
   const board = getWhiteboard(), my = ++boardReq;
+  if (planAbort) planAbort.abort();
+  const abort = planAbort = new AbortController();
+  lastPlanStart = Date.now();
+  const t0 = performance.now(); let firstStepMs = null, steps = 0;
+  setBadge("Animated · planning", "live");
+  boardEvent("planning", "info", "Asking Claude what to draw (" + transcript.length + " turns, " + board.summary().length + " items on the board" + (toolHint ? ", plus the agent's show_on_board request" : "") + ").");
   try {
-    const plan = await window.WhiteboardCore.planBoard({ apiKey: key, turns: transcript, boardItems: board.summary(), nextSlot: board.nextSlot(), graphIds: board.graphIds() });
-    if (my !== boardReq) return; // the student spoke while Claude was thinking, or a newer turn arrived
-    if (plan.errors.length) console.warn("Whiteboard: some drawing instructions were rejected", plan.errors);
-    if (!plan.ops.length){
-      if (plan.errors.length){ statusEl.textContent = "Whiteboard: using the classic board for this turn."; await drawBoard(); }
-      return; // nothing new worth drawing
+    const result = await window.WhiteboardCore.planBoardStream({
+      apiKey: key, turns: transcript, boardItems: board.summary(), nextSlot: board.nextSlot(), graphIds: board.graphIds(), hint: toolHint, signal: abort.signal,
+      onOps: (ops) => {
+        if (my !== boardReq) return;
+        if (firstStepMs === null){ firstStepMs = Math.round(performance.now() - t0); showSurface("animated"); setBadge("Animated · drawing", "live"); boardEvent("first-step", "info", "First drawing step arrived after " + firstStepMs + " ms; the pen starts now."); }
+        steps += ops.length; board.enqueue(ops);
+      },
+    });
+    if (my !== boardReq) return;
+    if (result.errors.length) boardEvent("planner", "warn", result.errors.length + " drawing step(s) were rejected: " + result.errors.slice(0, 3).join("; "));
+    if (steps === 0){
+      if (toolHint || result.errors.length) fallbackToClassic(toolHint ? "Claude drew nothing for the agent's request" : "Claude's drawing steps could not be used");
+      else { setBadge("Animated · nothing to draw"); boardEvent("nothing", "info", "Claude chose to draw nothing for this turn."); }
+      return;
     }
-    const lastTeacher = [...transcript].reverse().find(m => m.role === "teacher");
-    const speechLeft = window.WhiteboardCore.estimateSpeechMs(lastTeacher ? lastTeacher.text : "") - (Date.now() - turnStartedAt);
-    showSurface("animated"); // must be visible before drawing so text can be measured
-    board.enqueue(plan.ops, { budgetMs: Math.max(1500, speechLeft) });
+    setBadge("Animated · " + steps + " steps", "live");
+    boardEvent("animated", "info", "Drawing " + steps + " step(s) by hand; plan complete after " + Math.round(performance.now() - t0) + " ms" + (result.usage && result.usage.output_tokens ? " (" + result.usage.output_tokens + " output tokens)" : "") + ".");
   } catch(e){
-    if (e && e.status === 401){ statusEl.textContent = "Whiteboard: the Anthropic key didn't work. Check it in Setup."; return; }
-    if (my === boardReq) await drawBoard(); // the classic board is the safety net
+    if (e && e.name === "AbortError"){ boardEvent("planner", "info", "Plan cancelled (the student spoke or a newer turn started)."); return; }
+    if (e && e.status === 401){ statusEl.textContent = "Whiteboard: the Anthropic key didn't work. Check it in Setup."; setBadge("Anthropic key rejected", "warn"); boardEvent("planner", "error", "Anthropic rejected the API key (401)."); return; }
+    boardEvent("planner", "error", "Planner failed: " + (e && (e.status ? "HTTP " + e.status : e.message)));
+    if (my !== boardReq) return;
+    if (steps > 0){ boardEvent("planner", "warn", "The plan stopped after " + steps + " step(s); keeping what was drawn."); return; }
+    fallbackToClassic("planner error " + (e && (e.status || e.message)));
   }
 }
 async function drawBoard(){
@@ -262,12 +322,12 @@ If the latest turn is small talk or nothing new is being explained, reply with e
         messages: [{ role: "user", content: "Conversation so far:\n" + convoText }]
       })
     });
-    if (!res.ok){ if (res.status === 401) statusEl.textContent = "Whiteboard: the Anthropic key didn't work. Check it in Setup."; return; }
+    if (!res.ok){ if (res.status === 401) statusEl.textContent = "Whiteboard: the Anthropic key didn't work. Check it in Setup."; boardEvent("classic", "error", "Classic board request failed: HTTP " + res.status); return; }
     const data = await res.json();
     if (my !== boardReq || data.stop_reason === "refusal") return;
     const html = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").replace(/^\s*```(?:html)?|```\s*$/g, "").trim();
-    if (html && html !== "KEEP") showBoard(html);
-  } catch(e){ /* the lesson keeps going without the board */ }
+    if (html && html !== "KEEP"){ boardEvent("classic", "info", "Classic board drew the whole sketch at once."); showBoard(html); }
+  } catch(e){ boardEvent("classic", "error", "Classic board failed: " + (e && e.message)); /* the lesson keeps going without the board */ }
 }
 
 /* Lesson */
@@ -286,7 +346,22 @@ async function start(isRetry){
       agentId,
       connectionType: connType,
       clientTools: {
-        show_on_board: async ({ content }) => { if (content){ toolUsedThisTurn = true; showBoard(content); } return "The board now shows it."; }
+        // The agent's own board tool. In Animated mode its finished HTML is NOT painted (that would show a completed
+        // board at once); what it asks for is passed to the animated board, which draws it by hand. If that cannot
+        // be done, the classic fallback shows the agent's HTML.
+        show_on_board: async ({ content }) => {
+          if (!content) return "The board now shows it.";
+          lastToolHtml = content; toolAt = Date.now();
+          if (!useAnimatedBoard()){ toolUsedThisTurn = true; boardEvent("classic", "info", "The agent's show_on_board tool drew the classic board (" + content.length + " characters of HTML)."); showBoard(content); }
+          else if (lastPlanStart > 0) boardEvent("tool", "info", "The agent's show_on_board tool was called after this turn's drawing had already started; the teacher's words keep driving the drawing.");
+          else {
+            toolHint = htmlToText(content);
+            boardEvent("tool", "info", "The agent's show_on_board tool was called (" + content.length + " characters of HTML). Not painting its finished HTML: the animated board will draw it by hand.");
+            clearTimeout(toolTimer);
+            toolTimer = setTimeout(() => { if (lastPlanStart < toolAt) scheduleBoard(); }, 2500); // the teacher's own words normally start the drawing; this covers a silent tool call
+          }
+          return "The board now shows it.";
+        }
       },
       onConnect: () => { $("call").classList.add("live"); $("callWord").textContent = "End lesson"; setMode("listening"); },
       onDisconnect: (d) => {
@@ -298,7 +373,8 @@ async function start(isRetry){
         if (retry){ connType = "webrtc"; statusEl.textContent += " · Trying another way to connect..."; setTimeout(() => start(true), 600); }
       },
       onModeChange: ({ mode }) => {
-        if (mode === "speaking" && app.dataset.mode !== "speaking"){ turnStartedAt = Date.now(); if (whiteboard) whiteboard.beginTurn(); } // a new spoken turn begins
+        if (mode === "speaking" && app.dataset.mode !== "speaking"){ turnStartedAt = Date.now(); turnSpeechDone = false; if (whiteboard) whiteboard.beginTurn(); } // a new spoken turn begins
+        else if (mode !== "speaking" && app.dataset.mode === "speaking") turnSpeechDone = true;
         setMode(mode === "speaking" ? "speaking" : "listening");
       },
       // The agent was cut off by the student: stop drawing whatever was still queued.
@@ -312,8 +388,11 @@ async function start(isRetry){
         captionEl.classList.toggle("you", fromYou);
         captionEl.textContent = fromYou ? "You: " + text : text;
         if (!fromYou) heardAgent = true;
-        if (fromYou){ interruptBoard(); toolUsedThisTurn = false; noteMessage("student", text); }
-        else { noteMessage("teacher", text); scheduleBoard(); }
+        if (fromYou){ interruptBoard(); toolUsedThisTurn = false; toolHint = ""; lastToolHtml = ""; lastPlanStart = 0; noteMessage("student", text); }
+        else {
+          if (turnSpeechDone && Date.now() - turnStartedAt > 2000){ turnStartedAt = Date.now(); turnSpeechDone = false; if (whiteboard) whiteboard.beginTurn(); } // text can arrive before the voice starts
+          noteMessage("teacher", text); boardEvent("turn", "info", "Teacher turn received (" + text.length + " characters). " + (useAnimatedBoard() ? "Planning the drawing." : "Classic board.")); scheduleBoard();
+        }
       },
       onError: (msg, ctx) => { lastProblem = "Problem (" + connType + "): " + describe(typeof msg === "string" ? msg : (msg?.message || String(msg)), ctx); statusEl.textContent = problems.concat(lastProblem).join("  ||  "); console.error(lastProblem, ctx); }
     });
@@ -328,7 +407,7 @@ $("call").onclick = async () => { if (convo){ await convo.endSession(); } else {
 $("typed").addEventListener("input", () => { if (convo) convo.sendUserActivity(); });
 function sendTyped(){ const q = $("typed").value.trim(); if (!q) return;
   if (!convo){ statusEl.textContent = "Press Start lesson first."; return; }
-  convo.sendUserMessage(q); $("typed").value = ""; interruptBoard(); toolUsedThisTurn = false; noteMessage("student", q);
+  convo.sendUserMessage(q); $("typed").value = ""; interruptBoard(); toolUsedThisTurn = false; toolHint = ""; lastToolHtml = ""; lastPlanStart = 0; noteMessage("student", q);
   captionEl.classList.add("you"); captionEl.textContent = "You: " + q;
 }
 $("sendBtn").onclick = sendTyped;

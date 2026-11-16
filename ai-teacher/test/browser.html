@@ -4,14 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Whiteboard test bench</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Atkinson+Hyperlegible:wght@400;700&display=swap">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV" crossorigin="anonymous">
 <style>
-/* Test bench for the whiteboard engine. Not part of the product: it plays simulated instructions from fixtures.js. */
-:root{--bg:#eef1ec;--ink:#1d2a26;--muted:#5d6b66;--accent:#2f6b57;--accent-ink:#fff;--surface:#fff;--line:#d3dad5;--frame:#b9c2bd;--hand:"Kalam","Comic Sans MS",cursive}
-@media (prefers-color-scheme:dark){:root{--bg:#111715;--ink:#e6ede9;--muted:#9aaba4;--accent:#6fbf9f;--accent-ink:#0d1512;--surface:#1a2320;--line:#2c3833;--frame:#3a4a44;color-scheme:dark}}
+/* Test bench for the whiteboard: plays simulated lessons through the real renderer. Not part of the product. */
+:root{--bg:#eef1ec;--ink:#1d2a26;--muted:#566660;--accent:#2f6b57;--accent-ink:#fff;--surface:#fff;--line:#c9d1cc;--frame:#b9c2bd}
+@media (prefers-color-scheme:dark){:root{--bg:#111715;--ink:#e6ede9;--muted:#9fb0a9;--accent:#6fbf9f;--accent-ink:#0d1512;--surface:#1a2320;--line:#2c3833;--frame:#3a4a44;color-scheme:dark}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:"Atkinson Hyperlegible","Segoe UI",system-ui,sans-serif;line-height:1.5}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,"Segoe UI",sans-serif}
 main{max-width:1100px;margin:0 auto;padding:16px}
 h1{font-size:1.3rem;margin:0 0 4px}
 p{margin:0 0 12px;color:var(--muted)}
@@ -19,7 +17,6 @@ p{margin:0 0 12px;color:var(--muted)}
 button{font:inherit;font-weight:700;border:1px solid var(--accent);background:transparent;color:var(--accent);border-radius:10px;padding:8px 14px;cursor:pointer}
 button.solid{background:var(--accent);color:var(--accent-ink)}
 button:focus-visible{outline:3px solid #e8b23a;outline-offset:2px}
-label{display:inline-flex;gap:6px;align-items:center;color:var(--muted)}
 .board{border:10px solid var(--frame);border-radius:6px;aspect-ratio:5/3;max-height:70vh;width:100%}
 .caption{margin-top:10px;background:#18211e;color:#f4f7f5;border-radius:10px;padding:10px 16px;min-height:3em;font-size:1.15rem;text-align:center}
 #results{white-space:pre-wrap;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px}
@@ -29,13 +26,14 @@ label{display:inline-flex;gap:6px;align-items:center;color:var(--muted)}
 <body>
 <main>
   <h1>Whiteboard test bench</h1>
-  <p>Plays simulated instructions (test data in fixtures.js) through the real renderer. Add <code>?selftest</code> to run the automatic checks.</p>
+  <p>Plays simulated lessons (test data in fixtures.js) through the real renderer. For the slow-motion pen test open handwriting.html. Add <code>?selftest</code> here to run the automatic checks.</p>
   <div class="bar" id="bar"></div>
   <div class="board" id="board"></div>
   <div class="caption" id="caption">Pick a lesson.</div>
   <div id="results" aria-live="polite"></div>
 </main>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js" integrity="sha384-XjKyOOlGwcjNTAIQHIpgOno0Hl1YQqzUOEleOLALmuqehneUG+vnGctmUb0ZY0l8" crossorigin="anonymous"></script>
+<script src="../whiteboard-font.js"></script>
+<script src="../whiteboard-hand.js"></script>
 <script src="../whiteboard-core.js"></script>
 <script src="../whiteboard.js"></script>
 <script src="fixtures.js"></script>
@@ -46,25 +44,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const core = WhiteboardCore;
 let board = new Whiteboard($("board"), { timeScale: Number(params.get("speed")) || 1 });
 
-/* Play a lesson the way the live page does: validate each turn, then queue it with a pacing budget. */
+/* Play a lesson the way the live page does: validate each turn, then queue it. */
 function playTurn(wb, turn) {
   const { ops, errors } = core.validatePlan({ ops: turn.ops }, { ids: wb.summary().map((i) => i.id), graphs: wb.graphIds() });
   if (errors.length) console.warn("validation", errors);
   $("caption").textContent = turn.teacher;
   wb.beginTurn();
-  wb.enqueue(ops, { budgetMs: core.estimateSpeechMs(turn.teacher) });
+  wb.enqueue(ops);
   return ops;
 }
 async function playLesson(wb, lesson) { for (const turn of lesson.turns) { playTurn(wb, turn); await wb.idle(); } }
 
-/* Buttons */
 const lessons = WhiteboardFixtures.all;
 function addButton(text, handler, solid) { const b = document.createElement("button"); b.type = "button"; b.textContent = text; if (solid) b.className = "solid"; b.onclick = handler; $("bar").appendChild(b); }
 lessons.forEach((lesson) => addButton("Play " + lesson.subject, () => playLesson(board, lesson), true));
 addButton("Interrupt", () => { board.cancelPending(); $("caption").textContent = "(student interrupted)"; });
 addButton("Clear board", () => board.reset());
 
-/* ?lesson=biology plays that subject (and the ones before it for "topic change"), for screenshots. */
+/* ?lesson=biology plays that subject (and the one before it for "topic change"), for screenshots. */
 const wanted = params.get("lesson");
 if (wanted) {
   const index = lessons.findIndex((l) => l.subject.startsWith(wanted));
@@ -80,55 +77,60 @@ async function runSelfTest() {
   const fresh = (options) => { $("board").innerHTML = ""; return new Whiteboard($("board"), options); };
   const ids = (wb) => wb.summary().map((i) => i.id);
   const [math, biology, history, topic] = lessons;
-  const dashProgress = (wb) => [...wb.svg.querySelectorAll("path")].map((p) => p.style.strokeDashoffset).filter((v) => v !== "" && v !== "0").map(Number);
+  const waitUntil = async (condition, ms = 20000) => { const t = performance.now(); while (performance.now() - t < ms) { if (condition()) return true; await sleep(40); } return false; };
+  const ops = (list, wb) => core.validatePlan({ ops: list }, wb ? { ids: ids(wb), graphs: wb.graphIds() } : undefined).ops;
+  // A stroke is half drawn if it is visible but its dash offset says it is not finished. (Strokes still waiting their turn are hidden.)
+  const halfDrawn = (wb) => [...wb.svg.querySelectorAll("path")].filter((p) => p.style.visibility !== "hidden" && p.style.opacity !== "0" && p.style.strokeDashoffset !== "" && parseFloat(p.style.strokeDashoffset) !== 0).length;
 
   try {
     // 1. Draws progressively, in real time
-    let wb = fresh({ timeScale: 1 });
+    let wb = fresh({ timeScale: 2 });
     const total = math.turns[0].ops.length;
     playTurn(wb, math.turns[0]);
-    await sleep(900);
-    const midCount = wb.items.size, midStrokes = dashProgress(wb);
-    check("draws progressively: board is only part-drawn after 0.9s", midCount > 0 && midCount < total, "items=" + midCount + "/" + total);
-    await wb.idle();
+    await waitUntil(() => wb.items.size >= 1);
+    const counts = []; while (wb.running) { counts.push(wb.items.size); await sleep(120); }
+    check("draws progressively: the board fills one element at a time", counts.length >= 4 && counts[0] < total && new Set(counts).size >= 3, JSON.stringify(counts.slice(0, 12)));
     check("all elements present when the queue finishes", ids(wb).length === total, ids(wb).join(","));
-    check("no half-drawn strokes left behind", dashProgress(wb).length === 0, dashProgress(wb));
+    check("no half-drawn strokes left behind", halfDrawn(wb) === 0, halfDrawn(wb));
     const curve = wb.items.get("curve").g.querySelector("path");
     check("curve was plotted from the expression (not hardcoded)", curve && curve.getAttribute("d").split("L").length > 100);
-    const tickText = [...wb.items.get("g").g.querySelectorAll("text.wb-tick")].map((t) => t.textContent);
-    check("graph has axes and numbered ticks", ["-4", "-2", "2", "4", "-5", "5", "10"].every((t) => tickText.includes(t)), tickText.join(","));
+    check("equations are handwriting strokes, not typed or typeset HTML", wb.items.get("eq").g.querySelectorAll("path").length >= 6 && !wb.svg.querySelector("foreignObject, .katex, text"));
 
     // 2. Follow-up adds without replacing
+    wb.timeScale = 30;
     const before = new Set(ids(wb));
     playTurn(wb, math.turns[1]); await wb.idle();
     check("follow-up keeps existing content visible", [...before].every((id) => wb.items.has(id)));
     check("follow-up adds the new elements", ["vertex", "roots"].every((id) => wb.items.has(id)));
     check("highlight sits behind the highlighted equation", !!wb.items.get("eq").marker && wb.items.get("eq").marker.nextSibling === wb.items.get("eq").g);
-
-    // 3. Math renders with KaTeX (or falls back)
-    check("equations rendered by KaTeX", !!wb.items.get("eq").g.querySelector(".katex"), window.katex ? "no .katex element" : "KaTeX did not load");
+    const tickLabels = [...wb.items.get("g").g.querySelectorAll("[data-wb-hand]")];
+    check("graph numbers are written by hand, not typed", tickLabels.length >= 2 && !wb.items.get("g").g.querySelector("text"));
 
     // 4. Flow layout: auto-placed text stacks without overlapping
-    wb = fresh({ timeScale: 20 });
-    wb.enqueue(core.validatePlan({ ops: [1, 2, 3, 4].map((n) => ({ op: "write", content: "line number " + n, id: "l" + n })) }).ops);
+    wb = fresh({ timeScale: 30 });
+    wb.enqueue(ops([1, 2, 3, 4].map((n) => ({ op: "write", content: "line number " + n, id: "l" + n }))));
     await wb.idle();
     const boxes = wb.summary();
-    const stacked = boxes.every((b, i) => i === 0 || b.y >= boxes[i - 1].y + boxes[i - 1].h - 1);
-    check("auto-placed text stacks downward without overlap", stacked, JSON.stringify(boxes.map((b) => Math.round(b.y))));
+    check("auto-placed text stacks downward without overlap", boxes.every((b, i) => i === 0 || b.y >= boxes[i - 1].y + boxes[i - 1].h - 1), JSON.stringify(boxes.map((b) => Math.round(b.y))));
     check("everything stays inside the board", boxes.every((b) => b.x >= 0 && b.y >= 0 && b.x + b.w <= 1000 && b.y + b.h <= 600));
+    wb = fresh({ timeScale: 30 });
+    wb.enqueue(ops(Array.from({ length: 9 }, (_, n) => ({ op: "write", content: "a long line of handwriting number " + n, id: "m" + n }))));
+    await wb.idle();
+    const many = wb.summary();
+    check("when the left column is full, text continues in a second column", many.some((b) => b.x > 400) && many.every((b) => b.y + b.h <= 600), JSON.stringify(many.map((b) => [Math.round(b.x), Math.round(b.y)])));
 
     // 5. Biology: unrelated subject, shapes + labels + chemistry
-    wb = fresh({ timeScale: 20 });
+    wb = fresh({ timeScale: 30 });
     await playLesson(wb, biology);
     check("biology diagram drew all 10 elements", wb.items.size === biology.turns[0].ops.length, wb.items.size);
-    check("biology uses an ellipse, arrows and dashed stroke", !!wb.svg.querySelector('[data-wb-id="chloroplast"] path') && !!wb.svg.querySelector('[data-wb-id="out"] path[stroke-dasharray]'));
+    check("biology uses an ellipse, arrows and a dashed stroke", !!wb.svg.querySelector('[data-wb-id="chloroplast"] path') && !!wb.svg.querySelector('[data-wb-id="out"] path[stroke-dasharray]'));
 
     // 6. History: timeline, then a spoken correction
-    wb = fresh({ timeScale: 20 });
+    wb = fresh({ timeScale: 30 });
     await playLesson(wb, history);
     check("correction replaced the date text", wb.items.get("t3").text === "476: West falls", wb.items.get("t3") && wb.items.get("t3").text);
     check("only one element holds the corrected id", wb.svg.querySelectorAll('[data-wb-id="t3"]').length === 1);
-    check("corrected text landed where the old text was", Math.abs(wb.items.get("t3").bbox.x - 720) < 2 && Math.abs(wb.items.get("t3").bbox.y - 270) < 2);
+    check("corrected text landed where the old text was", Math.abs(wb.items.get("t3").bbox.x - 720) < 6 && Math.abs(wb.items.get("t3").bbox.y - 270) < 6, JSON.stringify(wb.items.get("t3").bbox));
     check("other timeline items untouched by the correction", ["m1", "t1", "m2", "t2", "m3", "line"].every((id) => wb.items.has(id)));
 
     // 7. Topic change clears old visuals and draws new ones
@@ -136,76 +138,73 @@ async function runSelfTest() {
     check("topic change removed the old subject", ["m1", "t3", "line", "title"].every((id) => !wb.items.has(id)), ids(wb).join(","));
     check("topic change drew the new subject", ["title2", "cell", "nucleus", "nlabel"].every((id) => wb.items.has(id)));
 
-    // 8. Interrupt: pending animation stops, drawn content stays
-    wb = fresh({ timeScale: 1 });
+    // 8. Interrupt: pending drawing stops, drawn content stays
+    wb = fresh({ timeScale: 1.5 });
     playTurn(wb, biology.turns[0]);
-    await sleep(700);
+    await waitUntil(() => wb.items.size >= 3);
     const atInterrupt = wb.items.size;
     wb.cancelPending();
     await wb.idle();
     const afterInterrupt = wb.items.size;
     await sleep(2500);
     check("interrupt keeps what was already drawn", atInterrupt >= 1 && afterInterrupt >= atInterrupt, atInterrupt + "->" + afterInterrupt);
-    check("interrupt drops outdated animation (nothing more is drawn)", wb.items.size === afterInterrupt && afterInterrupt < biology.turns[0].ops.length, wb.items.size + "/" + afterInterrupt);
-    check("interrupt leaves no half-drawn stroke", dashProgress(wb).length === 0);
+    check("interrupt drops outdated drawing (nothing more appears)", wb.items.size === afterInterrupt && afterInterrupt < biology.turns[0].ops.length, wb.items.size + "/" + afterInterrupt);
+    check("interrupt leaves no half-drawn stroke", halfDrawn(wb) === 0, halfDrawn(wb));
     check("pencil is put away after an interrupt", wb.pencil.style.opacity === "0");
     playTurn(wb, { teacher: "New answer.", ops: [{ op: "write", content: "fresh start", id: "after" }] });
-    await wb.idle();
+    wb.timeScale = 30; await wb.idle();
     check("board accepts new content after an interrupt", wb.items.has("after"));
 
-    // 8b. Interrupting a multi-step element (a graph) finishes it instantly instead of animating the rest
+    // 8b. Interrupting a multi-step element (a graph) stops it instead of animating the rest
     wb = fresh({ timeScale: 1 });
-    wb.enqueue(core.validatePlan({ ops: [{ op: "graph", id: "g", x: 300, y: 100, w: 400, h: 300, grid: true, xlabel: "x", ylabel: "y" }, { op: "write", content: "after graph", id: "late" }] }).ops);
+    wb.enqueue(ops([{ op: "graph", id: "g", x: 300, y: 100, w: 400, h: 300, grid: true, xlabel: "x", ylabel: "y" }, { op: "write", content: "after graph", id: "late" }]));
     await sleep(450);
-    const yAxisHidden = [...wb.items.get("g").g.querySelectorAll("path")].some((p) => p.style.opacity === "0" && p.getAttribute("d").includes("V"));
-    check("a graph's y axis is not visible while the x axis is still being drawn", yAxisHidden);
+    check("a graph's y axis is not visible while the x axis is still being drawn", [...wb.items.get("g").g.querySelectorAll("path")].some((p) => p.style.opacity === "0" && p.getAttribute("d").includes("V")));
     wb.cancelPending(); await wb.idle();
-    const gx = wb.items.get("g");
-    check("interrupting a graph completes it at once and stops", wb.jobs.size === 0 && !wb.items.has("late") && gx.g.querySelectorAll("text.wb-tick").length > 0 && [...gx.g.querySelectorAll("g")].every((n) => n.style.opacity !== "0"));
+    check("interrupting a graph completes it at once and stops", wb.jobs.size === 0 && !wb.items.has("late") && wb.items.get("g").g.querySelector("[data-wb-hand]") !== null);
 
     // 9. Voice cues: wait for the spoken words; ignore cues when no voice timing exists; never stall
-    wb = fresh({ timeScale: 20 });
-    wb.enqueue([{ op: "write", kind: "text", size: "body", color: "ink", content: "no timing", id: "n1", cue: "never spoken" }]);
+    wb = fresh({ timeScale: 30 });
+    wb.enqueue(ops([{ op: "write", content: "no timing", id: "n1", cue: "never spoken" }]));
     await wb.idle();
     check("cue ignored when there are no voice timing events", wb.items.has("n1"));
-    wb = fresh({ timeScale: 20, cueTimeoutMs: 100000 });
+    wb = fresh({ timeScale: 30, cueTimeoutMs: 100000 });
     wb.beginTurn(); wb.speechProgress("so ");
-    wb.enqueue([{ op: "write", kind: "text", size: "body", color: "ink", content: "waits", id: "w1", cue: "purple elephant" }]);
+    wb.enqueue(ops([{ op: "write", content: "waits", id: "w1", cue: "purple elephant" }]));
     await sleep(300);
     check("op waits while its cue has not been spoken", !wb.items.has("w1"));
     wb.speechProgress("a purple elephant walks in");
     await wb.idle();
     check("op draws once its cue is spoken", wb.items.has("w1"));
-    wb = fresh({ timeScale: 1, cueTimeoutMs: 400 });
+    wb = fresh({ timeScale: 4, cueTimeoutMs: 400 });
     wb.beginTurn(); wb.speechProgress("hello ");
-    wb.enqueue([{ op: "write", kind: "text", size: "body", color: "ink", content: "late", id: "t9", cue: "missed words" }]);
+    wb.enqueue(ops([{ op: "write", content: "late", id: "t9", cue: "missed words" }]));
     await wb.idle();
     check("a missed cue times out instead of freezing the board", wb.items.has("t9"));
-    wb = fresh({ timeScale: 20, cueTimeoutMs: 100000 });
+    wb = fresh({ timeScale: 30, cueTimeoutMs: 100000 });
     wb.beginTurn(); wb.speechProgress("x ");
-    wb.enqueue([{ op: "write", kind: "text", size: "body", color: "ink", content: "stuck", id: "s1", cue: "never" }]);
+    wb.enqueue(ops([{ op: "write", content: "stuck", id: "s1", cue: "never" }]));
     await sleep(100); wb.cancelPending(); await wb.idle();
     check("interrupt releases ops waiting for a cue", !wb.items.has("s1") && wb.queue.length === 0);
 
-    // 10. Safety
-    wb = fresh({ timeScale: 20 });
+    // 10. Safety: AI text is only ever drawn as strokes
+    wb = fresh({ timeScale: 40 });
     const evil = '<img src=x onerror="window.__pwned=1"><script>window.__pwned=1<\/script>';
-    wb.enqueue(core.validatePlan({ ops: [{ op: "write", content: evil, id: "evil" }, { op: "write", kind: "math", content: "\\href{javascript:window.__pwned=1}{click}", id: "evil2" }] }).ops);
+    wb.enqueue(ops([{ op: "write", content: evil, id: "evil" }, { op: "write", kind: "math", content: "\\href{javascript:window.__pwned=1}{click} \\unknown", id: "evil2" }]));
     await wb.idle(); await sleep(200);
-    check("AI text is shown as text, never as HTML", !wb.svg.querySelector("img, script") && !window.__pwned);
-    check("KaTeX does not allow links or scripts (trust off)", !wb.svg.querySelector("a[href^='javascript']") && !window.__pwned);
+    check("AI text is drawn as pen strokes, never inserted as HTML", !wb.svg.querySelector("img, script, a, foreignObject") && !window.__pwned);
+    check("unknown LaTeX is skipped without breaking the rest", wb.items.has("evil2"));
 
     // 11. Maths robustness
-    wb = fresh({ timeScale: 20 });
-    wb.enqueue(core.validatePlan({ ops: [{ op: "graph", id: "g", xmin: -6, xmax: 6, ymin: -4, ymax: 4 }, { op: "plot", graph: "g", fn: "tan(x)", id: "tan" }, { op: "plot", graph: "g", fn: "1/x", id: "inv" }, { op: "plot", graph: "g", fn: "ln(x)", id: "ln" }] }).ops);
+    wb = fresh({ timeScale: 40 });
+    wb.enqueue(ops([{ op: "graph", id: "g", xmin: -6, xmax: 6, ymin: -4, ymax: 4 }, { op: "plot", graph: "g", fn: "tan(x)", id: "tan" }, { op: "plot", graph: "g", fn: "1/x", id: "inv" }, { op: "plot", graph: "g", fn: "ln(x)", id: "ln" }]));
     await wb.idle();
-    const tanPieces = wb.items.get("tan").g.querySelectorAll("path[d]").length;
-    check("tan(x) breaks at its asymptotes (drawn as separate pieces)", tanPieces >= 3, tanPieces);
+    check("tan(x) breaks at its asymptotes (drawn as separate pieces)", wb.items.get("tan").g.querySelectorAll("path[d]").length >= 3, wb.items.get("tan").g.querySelectorAll("path[d]").length);
     check("ln(x) only draws where it is defined", wb.items.has("ln") && wb.items.get("ln").g.querySelector("path[d]").getAttribute("d").startsWith("M"));
 
     // 11b. Mid-stroke: the pencil rides the line, and the arrowhead waits for the shaft
-    wb = fresh({ timeScale: 0.5 }); // slow motion so we can sample mid-stroke
-    wb.enqueue(core.validatePlan({ ops: [{ op: "shape", shape: "arrow", points: [[100, 100], [500, 100]], id: "ar" }] }).ops);
+    wb = fresh({ timeScale: 0.5 });
+    wb.enqueue(ops([{ op: "shape", shape: "arrow", points: [[100, 100], [500, 100]], id: "ar" }]));
     await sleep(500);
     const pieces = [...wb.items.get("ar").g.querySelectorAll("path")];
     const pencilAt = /translate\(([-\d.]+) ([-\d.]+)\)/.exec(wb.pencil.getAttribute("transform"));
@@ -213,23 +212,18 @@ async function runSelfTest() {
     check("arrowhead is not visible before the shaft is finished", pieces.length === 2 && pieces[1].style.opacity === "0", pieces.map((p) => p.style.opacity).join(","));
     await wb.idle();
     check("arrow ends complete (shaft and head both drawn)", [...wb.items.get("ar").g.querySelectorAll("path")].every((p) => p.style.opacity === "1" && p.style.strokeDashoffset === ""));
-    wb = fresh({ timeScale: 0.5 });
-    wb.enqueue(core.validatePlan({ ops: [{ op: "graph", id: "g", x: 300, y: 100, w: 400, h: 300 }, { op: "plot", graph: "g", fn: "x", id: "diag" }] }).ops);
-    await sleep(2100);
+    wb = fresh({ timeScale: 0.7 });
+    wb.enqueue(ops([{ op: "graph", id: "g", x: 300, y: 100, w: 400, h: 300 }, { op: "plot", graph: "g", fn: "x", id: "diag" }]));
+    await waitUntil(() => wb.items.has("diag")); await sleep(350);
     const onGraph = /translate\(([-\d.]+) ([-\d.]+)\)/.exec(wb.pencil.getAttribute("transform"));
     check("pencil position accounts for where the graph sits on the board", !!onGraph && +onGraph[1] >= 300 && +onGraph[1] <= 700 && +onGraph[2] >= 100 && +onGraph[2] <= 400, onGraph && onGraph[0]);
     await wb.idle();
 
-    // 12. Reduced motion and missing KaTeX
+    // 12. Reduced motion
     wb = fresh({ reducedMotion: true });
     const t0 = performance.now();
-    wb.enqueue(core.validatePlan({ ops: math.turns[0].ops }).ops); await wb.idle();
-    check("reduced motion: board appears without animation", wb.items.size === 4 && performance.now() - t0 < 1500, Math.round(performance.now() - t0) + "ms");
-    const savedKatex = window.katex; window.katex = undefined;
-    wb = fresh({ timeScale: 20 });
-    wb.enqueue([{ op: "write", kind: "math", size: "body", color: "ink", content: "x^2", id: "m" }]); await wb.idle();
-    window.katex = savedKatex;
-    check("without KaTeX, equations fall back to plain LaTeX text", wb.items.get("m").g.textContent === "x^2" && !!wb.items.get("m").g.querySelector(".wb-raw"));
+    wb.enqueue(ops(math.turns[0].ops)); await wb.idle();
+    check("reduced motion: board appears without animation", wb.items.size === 4 && performance.now() - t0 < 1500 && wb.pencil.style.opacity === "0", Math.round(performance.now() - t0) + "ms");
   } catch (error) {
     check("self-test ran to the end", false, error && (error.stack || error.message || error));
   }

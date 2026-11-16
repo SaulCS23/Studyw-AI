@@ -107,35 +107,119 @@ test("validator: generated ids never collide with existing ones", () => {
 
 /* ---------- planner request/response (no network: fetch is faked) ---------- */
 
-test("planner: sends a forced tool call with only recent turns, and validates the answer", async () => {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** A fake Anthropic streaming response. `parts` are text pieces sent as text_delta events, `gapMs` apart. */
+function fakeStream(parts, { gapMs = 0, onDone } = {}) {
+  const encoder = new TextEncoder();
+  const event = (obj) => encoder.encode("event: " + obj.type + "\ndata: " + JSON.stringify(obj) + "\n\n");
+  let i = -1;
+  const body = new ReadableStream({
+    async pull(controller) {
+      if (i === -1) { controller.enqueue(event({ type: "message_start", message: { usage: { input_tokens: 5 } } })); i = 0; return; }
+      if (i >= parts.length) { controller.enqueue(event({ type: "message_delta", usage: { output_tokens: 9 } })); controller.enqueue(event({ type: "message_stop" })); controller.close(); if (onDone) onDone(); return; }
+      if (gapMs) await sleep(gapMs);
+      controller.enqueue(event({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: parts[i++] } }));
+    },
+  });
+  return { ok: true, status: 200, body };
+}
+
+test("planner: asks for a streamed answer with only the recent turns, the board summary and the teacher's own request", async () => {
   let sent;
-  const fetchImpl = async (url, init) => {
-    sent = { url, init, body: JSON.parse(init.body) };
-    return { ok: true, json: async () => ({ usage: { input_tokens: 1 }, content: [{ type: "tool_use", name: "update_whiteboard", input: { ops: [{ op: "write", content: "Hi" }, { op: "bogus" }] } }] }) };
-  };
+  const fetchImpl = async (url, init) => { sent = { url, init, body: JSON.parse(init.body) }; return fakeStream([]); };
   const turns = Array.from({ length: 10 }, (_, i) => ({ role: i % 2 ? "teacher" : "student", text: "line " + i }));
-  const result = await core.planBoard({ apiKey: "k", turns, boardItems: [{ id: "t1", type: "text", x: 1, y: 2, w: 3, h: 4, text: "old" }], nextSlot: { x: 40, y: 100 }, fetchImpl });
+  await core.planBoardStream({ apiKey: "k", turns, boardItems: [{ id: "t1", type: "text", x: 1, y: 2, w: 3, h: 4, text: "old" }], nextSlot: { x: 40, y: 100 }, hint: "show the triangle", fetchImpl });
   assert.equal(sent.url, "https://api.anthropic.com/v1/messages");
   assert.equal(sent.init.headers["x-api-key"], "k");
-  assert.deepEqual(sent.body.tool_choice, { type: "tool", name: "update_whiteboard" });
+  assert.equal(sent.body.stream, true);
   assert.equal(sent.body.model, core.PLANNER_MODEL);
+  assert.equal(sent.body.tools, undefined, "plain streamed text, so steps arrive line by line");
   const prompt = sent.body.messages[0].content;
   assert.ok(prompt.includes("line 9") && prompt.includes("line 4") && !prompt.includes("line 3"), "only the last 6 turns are sent");
   assert.ok(prompt.includes("t1 text") && prompt.includes("x=40 y=100"));
-  assert.equal(result.ops.length, 1);
-  assert.equal(result.errors.length, 1);
+  assert.ok(prompt.includes("show the triangle"));
+  assert.ok(sent.body.max_tokens <= 1500, "bounded output");
 });
 
-test("planner: HTTP errors throw with the status so the page can fall back", async () => {
-  const fetchImpl = async () => ({ ok: false, status: 401, json: async () => ({}) });
-  await assert.rejects(core.planBoard({ apiKey: "bad", turns: [], boardItems: [], fetchImpl }), (error) => error.status === 401);
+test("planner: steps are delivered while the stream is still open, so drawing can start early", async () => {
+  const lines = [
+    { op: "write", kind: "text", content: "Photosynthesis", size: "title", id: "t" },
+    { op: "shape", shape: "circle", x: 200, y: 300, r: 40, id: "sun" },
+    { op: "write", kind: "math", content: "CO_2 + H_2O", id: "in" },
+  ].map((o) => JSON.stringify(o) + "\n");
+  let streamDone = false; const arrivals = [];
+  const fetchImpl = async () => fakeStream(lines, { gapMs: 40, onDone: () => { streamDone = true; } });
+  const result = await core.planBoardStream({ apiKey: "k", turns: [], boardItems: [], fetchImpl, onOps: (ops) => arrivals.push({ n: ops.length, done: streamDone, first: ops[0].op }) });
+  assert.equal(arrivals.length, 3, "one delivery per step: " + JSON.stringify(arrivals));
+  assert.equal(arrivals[0].done, false, "the first step arrived before the stream finished");
+  assert.equal(arrivals[0].first, "write");
+  assert.equal(result.ops.length, 3);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.usage.output_tokens, 9);
 });
 
-test("planner: a reply without the tool call gives no ops instead of crashing", async () => {
-  const fetchImpl = async () => ({ ok: true, json: async () => ({ content: [{ type: "text", text: "sorry" }] }) });
-  const result = await core.planBoard({ apiKey: "k", turns: [], boardItems: [], fetchImpl });
+test("planner: a step split across network chunks is assembled; fences and chatter are ignored; bad steps are reported", async () => {
+  const text = '```json\n{"op":"write","kind":"text","content":"Hel' + 'lo","id":"a"}\nSure, here you go!\n{"op":"explode"}\n{"op":"write","kind":"text","content":"last, no newline","id":"b"}';
+  const pieces = []; for (let i = 0; i < text.length; i += 7) pieces.push(text.slice(i, i + 7));
+  const delivered = [];
+  const result = await core.planBoardStream({ apiKey: "k", turns: [], boardItems: [], fetchImpl: async () => fakeStream(pieces), onOps: (ops) => delivered.push(...ops) });
+  assert.deepEqual(result.ops.map((o) => o.content), ["Hello", "last, no newline"]);
+  assert.deepEqual(delivered.map((o) => o.content), ["Hello", "last, no newline"]);
+  assert.equal(result.errors.length, 2, JSON.stringify(result.errors));
+});
+
+test("planner: steps are validated against what is already on the board, including earlier steps in the same answer", async () => {
+  const lines = ['{"op":"graph","id":"g","xmin":-3,"xmax":3,"ymin":-1,"ymax":9}', '{"op":"plot","graph":"g","fn":"x^2"}', '{"op":"plot","graph":"nope","fn":"x"}', '{"op":"highlight","target":"old"}', '{"op":"plot","graph":"g","fn":"alert(1)"}'].map((l) => l + "\n");
+  const result = await core.planBoardStream({ apiKey: "k", turns: [], boardItems: [{ id: "old", type: "text" }], fetchImpl: async () => fakeStream(lines) });
+  assert.deepEqual(result.ops.map((o) => o.op), ["graph", "plot", "highlight"]);
+  assert.equal(result.errors.length, 2);
+});
+
+test("planner: more steps than allowed are cut off", async () => {
+  const lines = Array.from({ length: 30 }, (_, i) => JSON.stringify({ op: "write", content: "n" + i }) + "\n");
+  const result = await core.planBoardStream({ apiKey: "k", turns: [], boardItems: [], fetchImpl: async () => fakeStream(lines) });
+  assert.equal(result.ops.length, core.LIMITS.opsPerPlan);
+  assert.ok(result.errors.some((e) => e.includes("Too many")));
+});
+
+test("planner: an empty answer means nothing to draw", async () => {
+  const result = await core.planBoardStream({ apiKey: "k", turns: [], boardItems: [], fetchImpl: async () => fakeStream(["   \n"]) });
   assert.deepEqual(result.ops, []);
-  assert.equal(result.errors.length, 1);
+  assert.deepEqual(result.errors, []);
+});
+
+test("planner: HTTP errors throw with the status so the page can fall back (and say why)", async () => {
+  const fetchImpl = async () => ({ ok: false, status: 401, body: null, json: async () => ({}) });
+  await assert.rejects(core.planBoardStream({ apiKey: "bad", turns: [], boardItems: [], fetchImpl }), (error) => error.status === 401);
+});
+
+test("planner: an error event in the middle of the stream throws", async () => {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({ start(c) { c.enqueue(encoder.encode('data: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}\n\n')); c.close(); } });
+  await assert.rejects(core.planBoardStream({ apiKey: "k", turns: [], boardItems: [], fetchImpl: async () => ({ ok: true, body }) }), (error) => error.status === 529);
+});
+
+test("planner: aborting stops the stream (no more tokens are paid for)", async () => {
+  const controller = new AbortController();
+  const fetchImpl = async (url, init) => {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream({ async pull(c) { await sleep(20); if (init.signal.aborted) { c.error(new DOMException("aborted", "AbortError")); return; } c.enqueue(encoder.encode('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}\n\n')); } });
+    return { ok: true, body };
+  };
+  const promise = core.planBoardStream({ apiKey: "k", turns: [], boardItems: [], fetchImpl, signal: controller.signal });
+  setTimeout(() => controller.abort(), 60);
+  await assert.rejects(promise, (error) => error.name === "AbortError");
+});
+
+test("planner: if streaming is unavailable the whole answer is still understood", async () => {
+  const data = { content: [{ type: "text", text: '{"op":"write","content":"Hi"}\n{"op":"write","content":"There"}' }], usage: { output_tokens: 3 } };
+  const result = await core.planBoardStream({ apiKey: "k", turns: [], boardItems: [], fetchImpl: async () => ({ ok: true, body: null, json: async () => data }) });
+  assert.deepEqual(result.ops.map((o) => o.content), ["Hi", "There"]);
+});
+
+test("planner prompt tells Claude it is writing by hand and documents every step it may use", () => {
+  for (const word of ["pen", "JSON", ...core.OPS.map((op) => '"op":"' + op + '"')]) assert.ok(core.PLANNER_SYSTEM.includes(word.replace(/^"op":"pause"$/, "pause")), "mentions " + word);
+  assert.ok(core.PLANNER_SYSTEM.length < 4000, "prompt stays small: " + core.PLANNER_SYSTEM.length);
 });
 
 /* ---------- speech pacing ---------- */

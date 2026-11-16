@@ -1,23 +1,27 @@
-/* Whiteboard renderer: draws validated instructions (see whiteboard-core.js) onto an SVG board, one stroke at a time.
+/* Whiteboard renderer: draws validated instructions (see whiteboard-core.js) onto an SVG board the way a hand does.
  *
- *  - Everything is drawn through a queue, so new content is added to the board instead of replacing it.
- *  - Each element is animated: strokes draw themselves with a pencil tip leading them, text and
- *    equations are written left to right.
- *  - cancelPending() is the "student interrupted" button: it finishes the stroke in progress, drops
- *    everything still waiting, and keeps what is already on the board.
- *  - Nothing from the AI is ever inserted as HTML. Text goes in through textContent, maths through KaTeX.
+ *  - Text, numbers and equations are HANDWRITTEN: each letter is a few pen strokes (whiteboard-hand.js) and
+ *    each stroke draws itself while a pencil tip travels along it, lifts and moves to the next stroke.
+ *  - Axes, curves, arrows and shapes draw themselves the same way; graph numbers and labels are written too.
+ *  - Everything goes through a queue, so new content is added to the board instead of replacing it, and
+ *    drawing speed adapts to how long the teacher will keep talking.
+ *  - cancelPending() is the "student interrupted" button: the pen finishes the stroke it is on, the rest of
+ *    the queue is dropped, and what is already on the board stays.
+ *  - Nothing from the AI is ever inserted as HTML.
  *
- * Needs whiteboard-core.js first. KaTeX is optional: without it, equations show as plain LaTeX.
+ * Needs whiteboard-core.js and whiteboard-hand.js first.
  */
 (function (root) {
   "use strict";
-  const core = root.WhiteboardCore;
+  const core = root.WhiteboardCore, hand = root.WhiteboardHand;
   const SVG_NS = "http://www.w3.org/2000/svg";
   const { BOARD } = core;
 
   const INK = { ink: ["#24313a", "#eef3ea"], blue: ["#2459c4", "#8db8ff"], red: ["#c2412d", "#ff8d78"], green: ["#2c7a4b", "#7bd49f"], amber: ["#a8690a", "#f0c35a"], violet: ["#7440b8", "#c9a8f7"] };
   const FONT_SIZE = { title: 46, body: 34, small: 28 };
   const STROKE = 4;
+  // Pen speeds in board units per second: how fast a hand moves when writing, drawing a line, or tracing a curve.
+  const SPEED = { write: 320, line: 520, curve: 420, axes: 650, labelBoost: 2.2 };
 
   const STYLE = `
 .wb{--wb-paper:#fbfcfa;${Object.entries(INK).map(([n, c]) => `--wb-${n}:${c[0]};`).join("")}display:block;position:relative;background:var(--wb-paper)}
@@ -25,16 +29,13 @@
 .wb-svg{display:block;width:100%;height:100%}
 .wb-text{display:inline-block;font-family:var(--hand,"Kalam","Comic Sans MS","Segoe Print",cursive);line-height:1.25;white-space:normal;overflow-wrap:anywhere}
 .wb-text.wb-raw{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8em}
-.wb-text .katex{font-size:1.1em}
-.wb-tick{font-family:var(--hand,"Kalam",cursive);font-size:20px;fill:currentColor}
-.wb-label{font-family:var(--hand,"Kalam",cursive);font-size:26px}
 `;
 
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
   const linear = (t) => t;
   const colorVar = (name) => `var(--wb-${INK[name] ? name : "ink"})`;
+  const num = (v) => +v.toFixed(2);
 
   function svgEl(tag, attributes, parent) {
     const element = document.createElementNS(SVG_NS, tag);
@@ -45,7 +46,6 @@
 
   /* ---------- Path builders (board coordinates) ---------- */
 
-  const num = (v) => +v.toFixed(2);
   const linePath = (points, close) => "M" + points.map((p) => num(p[0]) + " " + num(p[1])).join(" L") + (close ? " Z" : "");
   const rectPath = (x, y, w, h) => `M${num(x)} ${num(y)} h${num(w)} v${num(h)} h${num(-w)} Z`;
   const ellipsePath = (cx, cy, rx, ry) => `M${num(cx - rx)} ${num(cy)} a${num(rx)} ${num(ry)} 0 1 1 ${num(2 * rx)} 0 a${num(rx)} ${num(ry)} 0 1 1 ${num(-2 * rx)} 0`;
@@ -63,16 +63,27 @@
     const a = wing(1), b = wing(-1);
     return ` M${num(a[0])} ${num(a[1])} L${num(tip[0])} ${num(tip[1])} L${num(b[0])} ${num(b[1])}`;
   }
+  const polylineLength = (points) => hand.strokeLength(points);
+  const msFor = (length, speed) => Math.max(120, (length / speed) * 1000);
 
   class Whiteboard {
     /**
      * @param {HTMLElement} host element to draw into
-     * @param {{timeScale?:number, reducedMotion?:boolean, cueTimeoutMs?:number}} [options] timeScale > 1 plays faster (tests)
+     * @param {object} [options]
+     * @param {number} [options.timeScale] > 1 plays faster (tests), < 1 slow motion
+     * @param {boolean} [options.reducedMotion] force the reduced-motion setting (tests)
+     * @param {number} [options.cueTimeoutMs] longest a step waits for its spoken cue
+     * @param {() => number|null} [options.speechLeftMs] how long the teacher will keep talking (null when unknown)
+     * @param {(level:string, message:string) => void} [options.log] diagnostics sink
+     * @param {boolean} [options.debugStrokeColors] colour every pen stroke differently, to see stroke order (tests)
      */
     constructor(host, options = {}) {
       this.host = host;
       this.timeScale = options.timeScale || 1;
       this.cueTimeoutMs = options.cueTimeoutMs == null ? 5000 : options.cueTimeoutMs;
+      this.speechLeftMs = options.speechLeftMs || null;
+      this.debugStrokeColors = !!options.debugStrokeColors;
+      this.log = options.log || ((level, message) => (console[level] || console.log)("[Whiteboard] " + message));
       // Read live, so changing the system setting mid-lesson takes effect on the next stroke.
       const motionQuery = root.matchMedia ? root.matchMedia("(prefers-reduced-motion: reduce)") : null;
       this.prefersReducedMotion = () => (options.reducedMotion != null ? options.reducedMotion : !!(motionQuery && motionQuery.matches));
@@ -80,8 +91,7 @@
       host.classList.add("wb");
       this.svg = svgEl("svg", { class: "wb-svg", viewBox: `0 0 ${BOARD.width} ${BOARD.height}`, role: "img", "aria-label": "Whiteboard, empty" }, host);
       this.layer = svgEl("g", {}, this.svg);
-      this.pencil = svgEl("g", { style: "opacity:0;pointer-events:none" }, this.svg);
-      svgEl("circle", { r: 7, fill: "#e8b23a", stroke: "#3a2a05", "stroke-width": 2 }, this.pencil);
+      this.buildPencil();
 
       this.items = new Map();
       this.queue = [];
@@ -89,34 +99,42 @@
       this.generation = 0;
       this.jobs = new Set();
       this.current = null;
-      this.raf = 0; this.scheduled = false; this.timer = 0;
+      this.scheduled = false; this.raf = 0; this.timer = 0;
       this.cueWaiters = new Set();
       this.idleWaiters = [];
       this.spoken = "";
       this.tracking = false;
       this.uid = 0;
+      this.typesetCache = new Map();
+      // Live counters, so tests and diagnostics can see that real strokes are being drawn.
+      this.stats = { strokesTotal: 0, strokesDone: 0, penDown: false, pen: null, handwritten: 0, fallbackText: 0 };
       this.resetFlow();
+    }
+
+    buildPencil() {
+      // A pencil seen from above-right: its point is the origin, which is what rides along the line being drawn.
+      this.pencil = svgEl("g", { style: "opacity:0;pointer-events:none", "data-wb-pencil": "" }, this.svg);
+      svgEl("path", { d: "M0 0 L3.2 -8 L15 -40 L24 -36.5 L9 -5.5 Z", fill: "#e9edef", stroke: "#33414a", "stroke-width": 1.6, "stroke-linejoin": "round" }, this.pencil);
+      svgEl("path", { d: "M0 0 L3.2 -8 L9 -5.5 Z", fill: "#f0b43a", stroke: "#33414a", "stroke-width": 1.2, "stroke-linejoin": "round" }, this.pencil);
+      svgEl("path", { d: "M14.5 -39 L24 -36 L21.5 -30 L12 -33.5 Z", fill: "#c2412d", opacity: 0.9 }, this.pencil);
     }
 
     /* ----- Public API ----- */
 
-    /** Add validated ops to the end of the queue. budgetMs is how long the teacher will probably keep talking. */
-    enqueue(ops, { budgetMs } = {}) {
+    /** Add validated ops to the end of the queue. They are drawn one after another, never all at once. */
+    enqueue(ops) {
       if (!ops || !ops.length) return;
-      const natural = ops.reduce((sum, op) => sum + this.naturalMs(op), 0);
-      // Squeeze or stretch the drawing to fit the speech, within limits so it never looks frantic or frozen.
-      const scale = budgetMs ? clamp(budgetMs / natural, 0.5, 1.6) : 1;
-      for (const op of ops) this.queue.push({ op, scale, generation: this.generation });
+      for (const op of ops) this.queue.push({ op, generation: this.generation });
       this.drain();
     }
 
-    /** The student interrupted: finish the stroke in progress, drop everything waiting, keep the drawing. */
+    /** The student interrupted: the pen finishes the stroke it is on, everything waiting is dropped, the drawing stays. */
     cancelPending() {
       this.generation++;
       this.queue.length = 0;
       for (const waiter of [...this.cueWaiters]) waiter.release();
-      if (this.current) this.current.cancelled = true; // the element in progress finishes instantly instead of carrying on animating
-      this.finishJobs();
+      if (this.current) this.current.cancelled = true; // the element in progress stops instead of carrying on animating
+      this.finishJobs(true);
     }
 
     /** Remove everything from the board (no animation). */
@@ -161,7 +179,7 @@
           await this.waitForCue(entry);
           if (entry.generation !== this.generation) continue;
           this.current = { cancelled: false };
-          try { await this.run(entry.op, entry.scale); } catch (error) { console.warn("Whiteboard op failed", entry.op, error); }
+          try { await this.run(entry.op, this.paceFor(entry)); } catch (error) { this.log("warn", "A drawing step failed: " + (error && error.message) + " " + JSON.stringify(entry.op).slice(0, 120)); }
           this.current = null;
         }
       } finally {
@@ -169,6 +187,20 @@
         this.pencil.style.opacity = 0;
         for (const resolve of this.idleWaiters.splice(0)) resolve();
       }
+    }
+
+    /**
+     * How fast to draw this step, as a multiplier on its natural duration (< 1 is faster). While the teacher is
+     * still talking, the drawing is paced to finish about when the speech does, but never faster than 1.5x a
+     * real hand or slower than 1.4x, so it neither appears all at once nor drags on.
+     */
+    paceFor(entry) {
+      const speechLeft = this.speechLeftMs ? this.speechLeftMs() : null;
+      if (speechLeft == null) return 1;
+      let queued = this.naturalMs(entry.op);
+      for (const waiting of this.queue) if (waiting.generation === this.generation) queued += this.naturalMs(waiting.op);
+      const scale = clamp((Math.max(0, speechLeft) + 2500) / Math.max(1, queued), 0.65, 1.4);
+      return Number.isFinite(scale) ? scale : 1;
     }
 
     waitForCue(entry) {
@@ -182,13 +214,26 @@
       });
     }
 
+    /** Typeset (and remember) the strokes for a write op. */
+    typeset(op) {
+      const size = FONT_SIZE[op.size] || FONT_SIZE.body;
+      const maxWidth = op.w || (op.x === undefined ? (op.size === "title" ? 920 : 440) : Math.min(460, BOARD.width - op.x - 20));
+      const key = [op.kind, size, maxWidth, op.content].join("\u0001");
+      if (!this.typesetCache.has(key)) {
+        if (this.typesetCache.size > 200) this.typesetCache.clear();
+        this.typesetCache.set(key, op.kind === "math" ? hand.typesetMath(op.content, { size }) : hand.typesetText(op.content, { size, maxWidth }));
+      }
+      return { ...this.typesetCache.get(key), size, maxWidth };
+    }
+
+    /** How long a step takes at normal hand speed, in ms. Used to pace the drawing against the speech. */
     naturalMs(op) {
       switch (op.op) {
-        case "write": return op.kind === "math" ? 700 + op.content.length * 45 : 350 + Math.min(op.content.length, 80) * 42;
-        case "graph": return 1100;
-        case "plot": return 1400;
-        case "point": return 400;
-        case "shape": return ["line", "arrow"].includes(op.shape) ? 600 : 1000;
+        case "write": { const t = this.typeset(op); return t.unsupported.length && op.kind !== "math" ? 800 : hand.strokeTimeline(t.strokes, { drawSpeed: SPEED.write }).total; }
+        case "graph": return msFor(op.w + op.h, SPEED.axes) + 900;
+        case "plot": return msFor(this.plotWidth(op) * 1.4, SPEED.curve) + (op.label ? 600 : 0);
+        case "point": return 500 + (op.label ? 500 : 0);
+        case "shape": return msFor(this.shapeLength(op), op.shape === "curve" ? SPEED.curve : SPEED.line);
         case "highlight": return 650;
         case "erase": return 400;
         case "correct": return 900 + this.naturalMs(op.with);
@@ -197,9 +242,23 @@
         default: return 500;
       }
     }
+    /** Width of the plotting area of the graph a plot step draws into (a plot has no width of its own). */
+    plotWidth(op) {
+      const graph = this.items.get(op.graph);
+      return graph && graph.graph ? graph.graph.plotW : 400;
+    }
+    shapeLength(op) {
+      switch (op.shape) {
+        case "rect": return 2 * (op.w + op.h);
+        case "circle": return 2 * Math.PI * op.r;
+        case "ellipse": return 2 * Math.PI * Math.sqrt((op.rx * op.rx + op.ry * op.ry) / 2);
+        case "polygon": return polylineLength([...op.points, op.points[0]]);
+        default: return polylineLength(op.points) + (op.shape === "arrow" ? 40 : 0);
+      }
+    }
 
     async run(op, scale) {
-      const d = (ms) => (ms * scale) / this.timeScale;
+      const d = (ms) => ((Number.isFinite(ms) ? ms : 0) * (Number.isFinite(scale) ? scale : 1)) / this.timeScale;
       switch (op.op) {
         case "write": return this.runWrite(op, d);
         case "graph": return this.runGraph(op, d);
@@ -216,10 +275,15 @@
 
     /* ----- Animation loop ----- */
 
-    tween(ms, step, ease = easeInOut) {
+    /**
+     * Run step(progress 0..1) over ms. `cancel`, if given, is what to do when the student interrupts
+     * (default: jump to the end), and may return after leaving the animation partly done.
+     */
+    tween(ms, step, ease = easeInOut, cancel = null) {
+      if (!Number.isFinite(ms)) { this.log("warn", "A drawing step had an invalid duration (" + ms + "); finishing it at once instead of stalling."); ms = 0; }
       if (ms <= 0 || this.prefersReducedMotion() || document.hidden || (this.current && this.current.cancelled)) { step(1); return Promise.resolve(); }
       return new Promise((resolve) => {
-        this.jobs.add({ ms, step, ease, resolve, start: null });
+        this.jobs.add({ ms, step, ease, resolve, start: null, cancel });
         this.schedule();
       });
     }
@@ -245,12 +309,16 @@
       }
       if (this.jobs.size) this.schedule();
     }
-    finishJobs() {
-      for (const job of [...this.jobs]) { job.step(1); this.jobs.delete(job); job.resolve(); }
+    finishJobs(interrupted) {
+      for (const job of [...this.jobs]) {
+        if (interrupted && job.cancel) job.cancel(); else job.step(1);
+        this.jobs.delete(job); job.resolve();
+      }
     }
-    movePencil(x, y, visible) {
+    movePencil(x, y, visible, down = true) {
       this.pencil.setAttribute("transform", `translate(${num(x)} ${num(y)})`);
-      this.pencil.style.opacity = visible ? 1 : 0;
+      this.pencil.style.opacity = visible ? (down ? 1 : 0.55) : 0; // paler while the pen is lifted and travelling
+      this.stats.penDown = !!(visible && down); this.stats.pen = { x, y };
     }
 
     /* ----- Items ----- */
@@ -289,40 +357,114 @@
       return { x: clamp(x, 6, Math.max(6, BOARD.width - width - 6)), y: clamp(y, 6, Math.max(6, BOARD.height - height - 6)) };
     }
 
-    /* ----- Writing ----- */
+    /* ----- Handwriting ----- */
+
+    /**
+     * Put pen strokes on the board, hidden, ready to be drawn. Each stroke is its own path whose dash offset
+     * is animated, so it is drawn along its length rather than faded or wiped in.
+     */
+    buildHand(parent, strokes, color, width) {
+      const group = svgEl("g", { fill: "none", stroke: color, "stroke-width": width, "stroke-linecap": "round", "stroke-linejoin": "round", "data-wb-hand": strokes.length }, parent);
+      const paths = strokes.map((points, index) => {
+        const length = hand.strokeLength(points);
+        const path = svgEl("path", { d: linePath(points) }, group);
+        if (this.debugStrokeColors) path.style.stroke = `hsl(${(index * 47) % 360} 75% 42%)`;
+        path.style.visibility = "hidden";
+        if (length > 0.6) { path.style.strokeDasharray = `${num(length)} ${num(length + 4)}`; path.style.strokeDashoffset = num(length); } // dots are just revealed
+        return { path, length };
+      });
+      this.stats.strokesTotal += strokes.length;
+      return { group, paths, timeline: hand.strokeTimeline(strokes, { drawSpeed: SPEED.write }) };
+    }
+
+    /**
+     * Draw a built hand: strokes are completed in order, the one in progress is partly drawn, and the pencil
+     * follows the pen (pale while lifted). offset = where the group sits on the board.
+     * On interruption the pen finishes the stroke it is on and stops.
+     */
+    async playHand(built, ms, offset, boost = 1) {
+      const { paths, timeline } = built, items = timeline.items;
+      let cursor = 0, stopped = false;
+      const complete = (i) => {
+        const { path } = paths[i];
+        path.style.visibility = "visible"; path.style.strokeDasharray = ""; path.style.strokeDashoffset = "";
+        this.stats.strokesDone++;
+      };
+      const step = (p) => {
+        const T = p * timeline.total;
+        while (cursor < items.length && items[cursor].drawEnd <= T + 1e-6) complete(cursor++);
+        if (cursor >= items.length) return;
+        const item = items[cursor];
+        if (T >= item.drawStart) {
+          const f = clamp((T - item.drawStart) / (item.drawEnd - item.drawStart), 0, 1), { path, length } = paths[cursor];
+          path.style.visibility = "visible";
+          if (length > 0.6) path.style.strokeDashoffset = num(length * (1 - f));
+        }
+        const pen = hand.penAt(timeline, T);
+        if (pen && !stopped) this.movePencil(offset.x + pen.x, offset.y + pen.y, true, pen.down);
+      };
+      const cancel = () => { // finish the stroke in progress, then stop
+        stopped = true;
+        if (cursor < items.length) { const T = items[cursor].drawEnd; step(Math.min(1, (T + 1e-3) / timeline.total)); }
+        built.interrupted = cursor < items.length;
+      };
+      await this.tween(ms / boost, (p) => { step(p); if (p >= 1) while (cursor < items.length) complete(cursor++); }, linear, cancel);
+    }
+
+    /** Write a handful of short labels (graph numbers, axis names) as quick handwriting. */
+    async writeLabels(parent, labels, color, offset, d, size) {
+      const strokes = [];
+      for (const label of labels) {
+        const typeset = hand.typesetText(label.text, { size: label.size || size, seed: label.text });
+        const dx = label.anchor === "end" ? -typeset.width : label.anchor === "middle" ? -typeset.width / 2 : 0;
+        strokes.push(...typeset.strokes.map((stroke) => stroke.map(([x, y]) => [x + label.x + dx, y + label.y - typeset.baseline])));
+      }
+      if (!strokes.length) return null;
+      const built = this.buildHand(parent, strokes, color, clamp(size * 0.09, 1.8, 3));
+      await this.playHand(built, d(built.timeline.total), offset, SPEED.labelBoost);
+      return built;
+    }
 
     async runWrite(op, d) {
+      const typeset = this.typeset(op);
+      const drawable = typeset.strokes.length && (op.kind === "math" || !typeset.unsupported.length);
+      if (typeset.unsupported.length) this.log("warn", `${op.kind === "math" ? "Maths" : "Text"} contains things the handwriting font cannot draw (${typeset.unsupported.join(" ")}): ${op.kind === "math" ? "drawing the rest" : "using the typed-text fallback"}.`);
+      if (!drawable) return this.runWriteFallback(op, d, typeset);
+
       const item = this.createItem(op.id, op.kind === "math" ? "math" : "text");
-      const fontSize = FONT_SIZE[op.size] || FONT_SIZE.body;
-      const maxWidth = op.w || (op.x === undefined ? (op.size === "title" ? 920 : 440) : Math.min(460, BOARD.width - op.x - 20));
+      const { x, y } = this.place(op, typeset.width, typeset.height);
+      item.g.setAttribute("transform", `translate(${num(x)} ${num(y)})`);
+      item.bbox = { x, y, w: typeset.width, h: typeset.height };
+      item.text = op.content;
+      this.describe();
+      const built = this.buildHand(item.g, typeset.strokes, colorVar(op.color), clamp(typeset.size * 0.082, 2.4, 4.4));
+      this.stats.handwritten++;
+      await this.playHand(built, d(built.timeline.total), { x, y });
+      if (built.interrupted) item.text += " (unfinished)";
+    }
+
+    /** Last resort for text the stroke font cannot draw (other alphabets): typed text, wiped in left to right. */
+    async runWriteFallback(op, d, typeset) {
+      this.stats.fallbackText++;
+      const item = this.createItem(op.id, "text");
+      const size = typeset.size, maxWidth = typeset.maxWidth;
       const fo = svgEl("foreignObject", { x: 0, y: 0, width: maxWidth + 40, height: 400 }, item.g);
       const box = document.createElement("div");
-      box.className = "wb-text";
-      box.style.cssText = `font-size:${fontSize}px;color:${colorVar(op.color)};max-width:${maxWidth}px;${op.size === "title" ? "font-weight:700;" : ""}`;
+      box.className = "wb-text" + (op.kind === "math" ? " wb-raw" : "");
+      box.style.cssText = `font-size:${size}px;color:${colorVar(op.color)};max-width:${maxWidth}px;${op.size === "title" ? "font-weight:700;" : ""}`;
+      box.textContent = op.content;
       fo.appendChild(box);
-
-      if (op.kind === "math" && root.katex) {
-        try { root.katex.render(op.content, box, { throwOnError: false, strict: "ignore", trust: false, maxExpand: 200, maxSize: 20 }); }
-        catch (error) { box.textContent = op.content; box.classList.add("wb-raw"); }
-      } else {
-        box.textContent = op.content;
-        if (op.kind === "math") box.classList.add("wb-raw"); // KaTeX did not load: show the LaTeX as plain text
-      }
-
-      void box.offsetWidth; // start any font loads, then wait briefly so we measure with the real fonts
-      if (document.fonts && document.fonts.ready) await Promise.race([document.fonts.ready, sleep(1200)]);
+      void box.offsetWidth;
       const width = Math.ceil(box.offsetWidth) + 8, height = Math.ceil(box.offsetHeight) + 8;
       fo.setAttribute("width", width); fo.setAttribute("height", height);
       const { x, y } = this.place(op, width, height);
       item.g.setAttribute("transform", `translate(${num(x)} ${num(y)})`);
       item.bbox = { x, y, w: width, h: height };
-      item.text = op.kind === "math" ? op.content : op.content;
+      item.text = op.content;
       this.describe();
-
-      // Write it left to right, the pencil riding the leading edge.
       const wipe = (p) => { box.style.clipPath = p >= 1 ? "" : `inset(-8px ${num((1 - p) * 100)}% -8px -8px)`; };
       wipe(0);
-      await this.tween(d(this.naturalMs(op)), (p) => { wipe(p); this.movePencil(x + p * width, y + height * 0.7, p < 1); }, linear);
+      await this.tween(d(900 + op.content.length * 40), (p) => { wipe(p); this.movePencil(x + p * width, y + height * 0.7, p < 1); }, linear);
     }
 
     /* ----- Drawing strokes ----- */
@@ -354,7 +496,7 @@
         path.style.opacity = p > 0 ? 1 : 0;
         const point = path.getPointAtLength(length * p);
         this.movePencil(point.x + offset.x, point.y + offset.y, true);
-      });
+      }, linear);
     }
 
     /** For dashed strokes, which cannot use the dash trick: reveal left to right behind a growing clip box. */
@@ -396,11 +538,12 @@
       const box = item.g.getBBox();
       item.bbox = { x: box.x, y: box.y, w: box.width, h: box.height };
       item.text = "";
+      const ms = d(this.naturalMs(op));
       if (op.dashed) {
         path.setAttribute("stroke-dasharray", "12 10");
-        await this.revealPath(path, item.bbox, d(this.naturalMs(op)));
+        await this.revealPath(path, item.bbox, ms);
       } else {
-        await this.drawPath(path, d(this.naturalMs(op)));
+        await this.drawPath(path, ms);
       }
       if (fill) await this.fadeIn(fill, d(250), 0.16);
     }
@@ -413,11 +556,13 @@
       const sx = (v) => margin.l + ((v - op.xmin) / (op.xmax - op.xmin)) * plotW;
       const sy = (v) => margin.t + plotH - ((v - op.ymin) / (op.ymax - op.ymin)) * plotH;
       item.g.setAttribute("transform", `translate(${op.x} ${op.y})`);
-      item.graph = { op, margin, plotW, plotH, sx, sy };
+      item.graph = { op, margin, plotW, plotH, sx, sy, axisX: 0 };
       item.bbox = { x: op.x, y: op.y, w: op.w, h: op.h };
+      const offset = { x: op.x, y: op.y };
 
       const axisX = op.xmin <= 0 && op.xmax >= 0 ? sx(0) : margin.l;
       const axisY = op.ymin <= 0 && op.ymax >= 0 ? sy(0) : margin.t + plotH;
+      item.graph.axisX = axisX;
       const xTicks = core.niceTicks(op.xmin, op.xmax, 7), yTicks = core.niceTicks(op.ymin, op.ymax, 6);
       const stroke = { fill: "none", stroke: "currentColor", "stroke-linecap": "round", "stroke-linejoin": "round" };
       item.g.style.color = colorVar("ink");
@@ -428,16 +573,22 @@
       }
       const xAxis = svgEl("path", { ...stroke, "stroke-width": 3, d: `M${margin.l - 6} ${num(axisY)} H${num(margin.l + plotW)}` + arrowHead([margin.l + plotW - 20, axisY], [margin.l + plotW, axisY], 12) }, item.g);
       const yAxis = svgEl("path", { ...stroke, "stroke-width": 3, style: "opacity:0", d: `M${num(axisX)} ${margin.t + plotH + 6} V${margin.t}` + arrowHead([axisX, margin.t + 20], [axisX, margin.t], 12) }, item.g);
-      await this.drawPath(xAxis, d(350), { x: op.x, y: op.y });
-      await this.drawPath(yAxis, d(350), { x: op.x, y: op.y });
+      await this.drawPath(xAxis, d(msFor(plotW + 30, SPEED.axes)), offset);
+      await this.drawPath(yAxis, d(msFor(plotH + 30, SPEED.axes)), offset);
 
-      const ticks = svgEl("g", { style: "opacity:0" }, item.g);
-      const tickLabel = (text, x, y, anchor) => { const t = svgEl("text", { class: "wb-tick", x: num(x), y: num(y), "text-anchor": anchor }, ticks); t.textContent = text; };
-      for (const v of xTicks) { if (Math.abs(v) < 1e-9 && axisX !== margin.l) continue; svgEl("path", { ...stroke, "stroke-width": 2, d: `M${num(sx(v))} ${num(axisY - 5)} v10` }, ticks); tickLabel(String(v), sx(v), axisY + 24, "middle"); }
-      for (const v of yTicks) { if (Math.abs(v) < 1e-9 && axisY !== margin.t + plotH) continue; svgEl("path", { ...stroke, "stroke-width": 2, d: `M${num(axisX - 5)} ${num(sy(v))} h10` }, ticks); tickLabel(String(v), axisX - 10, sy(v) + 5, "end"); }
-      if (op.xlabel) { const t = svgEl("text", { class: "wb-label", x: margin.l + plotW, y: num(axisY - 10), "text-anchor": "end", fill: "currentColor" }, ticks); t.textContent = op.xlabel; }
-      if (op.ylabel) { const t = svgEl("text", { class: "wb-label", x: num(axisX + 10), y: margin.t + 8, fill: "currentColor" }, ticks); t.textContent = op.ylabel; }
-      await this.fadeIn(ticks, d(250));
+      // Tick marks, then the numbers written by hand.
+      const ticks = svgEl("path", { ...stroke, "stroke-width": 2, style: "opacity:0", d:
+        xTicks.filter((v) => !(Math.abs(v) < 1e-9 && axisX !== margin.l)).map((v) => `M${num(sx(v))} ${num(axisY - 5)} v10`).join(" ") + " " +
+        yTicks.filter((v) => !(Math.abs(v) < 1e-9 && axisY !== margin.t + plotH)).map((v) => ` M${num(axisX - 5)} ${num(sy(v))} h10`).join(" ") }, item.g);
+      if (ticks.getAttribute("d").trim()) await this.fadeIn(ticks, d(180)); else ticks.remove();
+      const labels = [];
+      for (const v of xTicks) if (!(Math.abs(v) < 1e-9 && axisX !== margin.l)) labels.push({ text: String(v), x: sx(v), y: axisY + 28, anchor: "middle" });
+      for (const v of yTicks) if (!(Math.abs(v) < 1e-9 && axisY !== margin.t + plotH)) labels.push({ text: String(v), x: axisX - 12, y: sy(v) + 8, anchor: "end" });
+      await this.writeLabels(item.g, labels, "currentColor", offset, d, 22);
+      const axisLabels = [];
+      if (op.xlabel) axisLabels.push({ text: op.xlabel, x: margin.l + plotW - 4, y: axisY - 12, anchor: "end" });
+      if (op.ylabel) axisLabels.push({ text: op.ylabel, x: axisX + 12, y: margin.t + 14, anchor: "start" });
+      await this.writeLabels(item.g, axisLabels, "currentColor", offset, d, 28);
       item.text = [op.xlabel, op.ylabel].filter(Boolean).join(" vs ");
       this.describe();
     }
@@ -453,7 +604,7 @@
     async runPlot(op, d) {
       const graphItem = this.items.get(op.graph);
       if (!graphItem || !graphItem.graph) return;
-      const { op: graph, margin, plotW, plotH, sx, sy } = graphItem.graph;
+      const { op: graph, margin, plotW, plotH, sx, sy, axisX } = graphItem.graph;
       const item = this.graphChild(graphItem, op.id, "plot");
       const evaluate = core.compileExpression(op.fn);
       const from = Math.max(graph.xmin, op.from == null ? graph.xmin : op.from), to = Math.min(graph.xmax, op.to == null ? graph.xmax : op.to);
@@ -475,11 +626,13 @@
       const clipped = svgEl("g", { "clip-path": `url(#${clipId})` }, item.g);
       const path = svgEl("path", { d: pathData.trim(), fill: "none", stroke: colorVar(op.color), "stroke-width": STROKE + 0.5, "stroke-linecap": "round", "stroke-linejoin": "round" }, clipped);
       item.text = "";
-      await this.drawPath(path, d(this.naturalMs(op)), { x: graphItem.bbox.x, y: graphItem.bbox.y });
+      const offset = { x: graphItem.bbox.x, y: graphItem.bbox.y };
+      await this.drawPath(path, d(msFor(plotW * 1.4, SPEED.curve)), offset);
       if (op.label && labelPoint) {
-        const t = svgEl("text", { class: "wb-label", x: clamp(sx(labelPoint.x) - 14, margin.l + 60, margin.l + plotW), y: clamp(sy(labelPoint.y) + 4, margin.t + 20, margin.t + plotH), "text-anchor": "end", fill: colorVar(op.color) }, item.g);
-        t.textContent = op.label;
-        await this.fadeIn(t, d(250));
+        // Beside the curve, but never across the y axis or its letter.
+        const labelWidth = hand.typesetText(op.label, { size: 26 }).width;
+        const right = clamp(sx(labelPoint.x) - 14, axisX + 18 + labelWidth, margin.l + plotW);
+        await this.writeLabels(item.g, [{ text: op.label, x: right, y: clamp(sy(labelPoint.y) + 6, margin.t + 30, margin.t + plotH), anchor: "end" }], colorVar(op.color), offset, d, 26);
       }
     }
 
@@ -489,11 +642,11 @@
       const { sx, sy } = graphItem.graph;
       const item = this.graphChild(graphItem, op.id, "point");
       const cx = sx(op.px), cy = sy(op.py);
+      const offset = { x: graphItem.bbox.x, y: graphItem.bbox.y };
       const dot = svgEl("circle", { cx: num(cx), cy: num(cy), r: 0, fill: colorVar(op.color) }, item.g);
-      let label = null;
-      if (op.label) { label = svgEl("text", { class: "wb-label", x: num(cx + 12), y: num(cy - 10), fill: colorVar(op.color), style: "opacity:0" }, item.g); label.textContent = op.label; }
-      this.movePencil(graphItem.bbox.x + cx, graphItem.bbox.y + cy, true);
-      await this.tween(d(this.naturalMs(op)), (p) => { dot.setAttribute("r", num(7 * p)); if (label) label.style.opacity = p; });
+      this.movePencil(offset.x + cx, offset.y + cy, true);
+      await this.tween(d(300), (p) => { dot.setAttribute("r", num(7 * p)); });
+      if (op.label) await this.writeLabels(item.g, [{ text: op.label, x: cx + 14, y: cy - 12, anchor: "start" }], colorVar(op.color), offset, d, 26);
     }
 
     /* ----- Highlight, erase, correct ----- */
@@ -532,7 +685,7 @@
       if (!item || !item.bbox) return this.run(op.with, scale);
       const b = item.bbox;
       const strike = svgEl("path", { d: `M${num(b.x - 6)} ${num(b.y + b.h / 2)} L${num(b.x + b.w + 6)} ${num(b.y + b.h / 2 - 4)}`, stroke: colorVar("red"), "stroke-width": 5, "stroke-linecap": "round", fill: "none" }, this.layer);
-      await this.drawPath(strike, d(350));
+      await this.drawPath(strike, d(msFor(b.w + 12, SPEED.line)));
       await this.tween(d(250), () => {});
       strike.remove();
       await this.runErase(op.target, d);

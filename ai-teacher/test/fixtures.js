@@ -77,5 +77,40 @@
     ],
   };
 
-  return { mathematics, biology, history, topicChange, all: [mathematics, biology, history, topicChange] };
+  /** A showcase of everything the pen can do, for the slow-motion handwriting page. */
+  const handwriting = {
+    subject: "handwriting showcase",
+    turns: [
+      { teacher: "Watch the pen write words, numbers and equations.", ops: [
+        { op: "write", kind: "text", size: "title", content: "Photosynthesis", id: "h1" },
+        { op: "write", kind: "text", content: "Plants make sugar from light", id: "h2" },
+        { op: "write", kind: "text", size: "small", content: "Água, coração, ñandú, Zürich", id: "h3" },
+        { op: "write", kind: "math", content: "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}", id: "h4", color: "blue" },
+        { op: "write", kind: "math", content: "\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}", id: "h5" },
+        { op: "write", kind: "math", content: "6CO_2 + 6H_2O \\rightarrow C_6H_{12}O_6 + 6O_2", id: "h6", color: "green" },
+      ] },
+      { teacher: "Now a graph: axes, numbers and curves are drawn too.", ops: [
+        { op: "clear" },
+        { op: "graph", id: "g", x: 120, y: 40, w: 760, h: 500, xmin: -6.3, xmax: 6.3, ymin: -3, ymax: 3, xlabel: "x", ylabel: "y", grid: true },
+        { op: "plot", graph: "g", fn: "sin(x)", color: "blue", label: "sin x", id: "sine" },
+        { op: "plot", graph: "g", fn: "x/3", color: "red", label: "x / 3", id: "line" },
+        { op: "point", graph: "g", px: 0, py: 0, label: "origin", color: "green", id: "o" },
+      ] },
+      { teacher: "And a diagram: arrows, shapes and labels.", ops: [
+        { op: "clear" },
+        { op: "write", kind: "text", size: "title", content: "Water cycle", id: "wc" },
+        { op: "shape", shape: "circle", x: 130, y: 150, r: 48, color: "amber", fill: true, id: "sun" },
+        { op: "write", kind: "text", size: "small", content: "sun", x: 106, y: 210, color: "amber", id: "sunl" },
+        { op: "shape", shape: "curve", points: [[250, 420], [400, 380], [560, 400], [760, 360]], color: "blue", id: "sea" },
+        { op: "write", kind: "text", size: "small", content: "sea", x: 470, y: 440, color: "blue", id: "seal" },
+        { op: "shape", shape: "arrow", points: [[560, 380], [560, 200]], color: "violet", id: "up" },
+        { op: "write", kind: "text", size: "small", content: "evaporation", x: 580, y: 280, color: "violet", id: "upl" },
+        { op: "shape", shape: "ellipse", x: 620, y: 150, rx: 110, ry: 50, color: "ink", id: "cloud" },
+        { op: "write", kind: "text", size: "small", content: "cloud", x: 590, y: 130, id: "cloudl" },
+        { op: "shape", shape: "arrow", points: [[760, 190], [790, 340]], color: "blue", dashed: true, id: "rain" },
+      ] },
+    ],
+  };
+
+  return { mathematics, biology, history, topicChange, handwriting, all: [mathematics, biology, history, topicChange, handwriting] };
 });

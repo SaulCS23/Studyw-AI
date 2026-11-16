@@ -2,7 +2,7 @@
  *
  *  - compileExpression: a small safe maths parser (never eval) used to plot curves.
  *  - validatePlan: strict schema check for the drawing instructions Claude returns.
- *  - planBoard: the separate Claude call that turns the live conversation into instructions.
+ *  - planBoardStream: the separate Claude call that turns the live conversation into drawing steps, streamed one per line.
  *  - speech helpers: pace the drawing against the teacher's voice.
  *
  * Classic script (not an ES module) so ai-teacher/index.html still works when opened straight from disk.
@@ -18,7 +18,7 @@
   const SIZES = ["title", "body", "small"];
   const SHAPES = ["line", "arrow", "rect", "circle", "ellipse", "polyline", "polygon", "curve"];
   const OPS = ["write", "graph", "plot", "point", "shape", "highlight", "erase", "correct", "clear", "pause"];
-  const LIMITS = { opsPerPlan: 12, textLength: 140, latexLength: 200, pointsPerShape: 40, idLength: 24, cueLength: 60, pauseMs: 1500, expressionLength: 80 };
+  const LIMITS = { opsPerPlan: 12, textLength: 90, latexLength: 160, pointsPerShape: 40, idLength: 24, cueLength: 60, pauseMs: 1500, expressionLength: 80 };
   const PLANNER_MODEL = "claude-sonnet-5-5";
 
   /* ---------- Safe expression parser ---------- */
@@ -121,30 +121,35 @@
   const isId = (value) => typeof value === "string" && /^[a-z][a-z0-9_-]*$/i.test(value) && value.length <= LIMITS.idLength;
 
   /**
-   * Check a list of raw operations. Bad operations are dropped one by one (with a reason), so one
-   * mistake never blanks the whole board. Output contains only known fields with safe values.
-   * context.ids = ids already on the board.
+   * A validator that remembers what is on the board (and what earlier steps in the same plan created), so steps can
+   * be checked one at a time as they stream in. Bad steps are rejected with a reason; good ones come back cleaned:
+   * only known fields, safe values, ids that exist.
+   * context.ids = ids already on the board, context.graphs = ids of graphs.
    */
-  function validatePlan(rawPlan, context) {
-    const errors = [];
+  function createValidator(context) {
     const known = new Set((context && context.ids) || []);
     const graphs = new Set((context && context.graphs) || []);
+    let autoId = 0, accepted = 0;
+    const freshId = () => { let id; do { id = "a" + (++autoId); } while (known.has(id)); return id; };
+    return {
+      validate(raw) {
+        if (accepted >= LIMITS.opsPerPlan) return { op: null, error: "Too many ops, kept the first " + LIMITS.opsPerPlan };
+        try { const op = validateOperation(raw, known, graphs, freshId, true); if (op) accepted++; return { op, error: null }; }
+        catch (error) { return { op: null, error: error.message }; }
+      },
+    };
+  }
+
+  /** Check a whole list of raw operations at once (see createValidator for what is checked). */
+  function validatePlan(rawPlan, context) {
     const rawOps = Array.isArray(rawPlan) ? rawPlan : rawPlan && Array.isArray(rawPlan.ops) ? rawPlan.ops : null;
     if (!rawOps) return { ops: [], errors: ["Plan has no ops array"] };
+    const validator = createValidator(context), ops = [], errors = [];
     if (rawOps.length > LIMITS.opsPerPlan) errors.push("Too many ops, kept the first " + LIMITS.opsPerPlan);
-
-    let autoId = 0;
-    const freshId = () => { let id; do { id = "a" + (++autoId); } while (known.has(id)); return id; };
-    const ops = [];
-
-    for (const [index, raw] of rawOps.slice(0, LIMITS.opsPerPlan).entries()) {
-      try {
-        const op = validateOperation(raw, known, graphs, freshId, true);
-        if (op) ops.push(op);
-      } catch (error) {
-        errors.push("op " + index + ": " + error.message);
-      }
-    }
+    rawOps.slice(0, LIMITS.opsPerPlan).forEach((raw, index) => {
+      const { op, error } = validator.validate(raw);
+      if (op) ops.push(op); else if (error) errors.push("op " + index + ": " + error);
+    });
     return { ops, errors };
   }
 
@@ -254,57 +259,23 @@
     return out;
   }
 
-  /* ---------- The planner: a separate Claude call that returns structured instructions ---------- */
-
-  // One flat object keeps the tool definition small. The strict checking happens in validatePlan, not here.
-  const TOOL_SCHEMA = {
-    name: "update_whiteboard",
-    description: "Write or draw on the shared whiteboard. Operations run in order.",
-    input_schema: {
-      type: "object",
-      properties: {
-        ops: {
-          type: "array",
-          maxItems: LIMITS.opsPerPlan,
-          items: {
-            type: "object",
-            properties: {
-              op: { type: "string", enum: OPS },
-              id: { type: "string", description: "Name for new elements so later ops can refer to them" },
-              cue: { type: "string", description: "2-5 words copied from the teacher's turn: appear when the teacher says this" },
-              kind: { type: "string", enum: ["text", "math"], description: "write: plain text or LaTeX" },
-              content: { type: "string", description: "write: the text, or LaTeX for kind=math" },
-              size: { type: "string", enum: SIZES }, color: { type: "string", enum: COLORS },
-              x: { type: "number" }, y: { type: "number" }, w: { type: "number" }, h: { type: "number" },
-              r: { type: "number" }, rx: { type: "number" }, ry: { type: "number" },
-              xmin: { type: "number" }, xmax: { type: "number" }, ymin: { type: "number" }, ymax: { type: "number" },
-              xlabel: { type: "string" }, ylabel: { type: "string" }, grid: { type: "boolean" },
-              graph: { type: "string", description: "plot/point: id of the graph" },
-              fn: { type: "string", description: "plot: expression in x, e.g. x^2-3*x+1 or sin(x)" },
-              from: { type: "number" }, to: { type: "number" }, label: { type: "string" },
-              px: { type: "number" }, py: { type: "number" },
-              shape: { type: "string", enum: SHAPES },
-              points: { type: "array", items: { type: "array", items: { type: "number" } }, description: "[[x,y],...] in board units" },
-              dashed: { type: "boolean" }, fill: { type: "boolean" },
-              target: { type: "string", description: "highlight/erase/correct: element id (erase also accepts all)" },
-              with: { type: "object", description: "correct: the replacement write or shape op" },
-              ms: { type: "number" },
-            },
-            required: ["op"],
-          },
-        },
-      },
-      required: ["ops"],
-    },
-  };
+  /* ---------- The planner: a separate Claude call that streams one drawing step per line ---------- */
 
   const PLANNER_SYSTEM = [
-    "You are the whiteboard hand of a live voice tutor, for any subject. The teacher is speaking; decide what to write or draw to support the teacher's LATEST turn. Call update_whiteboard once.",
-    "Board: 1000x600 units, origin top-left. Text flows into free space automatically when you leave out x and y, so do that for most writing. Give x,y only for diagrams, and keep clear of the elements listed under 'On board'.",
-    "Add to the board; never redraw what is already there. Use clear only when the subject changes. Fix a mistake with correct. Use highlight to point at something that exists.",
-    "Order ops the way the teacher says things. Give each op a cue: 2-5 words copied from the teacher's turn where it should appear.",
-    "Stay sparse: at most 8 ops, one idea per turn, labels under 6 words. Equations are LaTeX with kind=math. Graphs: a graph op, then plot ops with explicit * and ^ (x^2-3*x+1). Diagrams: shapes (line, arrow, rect, circle, ellipse, curve, polygon) plus short text labels next to them. Colors: ink by default, others for emphasis.",
-    "If the turn is small talk or nothing visual would help, return an empty ops array.",
+    "You are the whiteboard hand of a live voice tutor, for any subject. The teacher is speaking; decide what to write or draw to support the teacher's LATEST turn.",
+    "Everything you output is drawn by a pen, stroke by stroke, while the teacher talks. So write like a teacher at a board: key words and short phrases (under 6 words), formulas, labels, quick sketches. Never whole sentences. One idea per turn, at most 8 steps.",
+    "Output ONLY JSON objects, one per line (JSON Lines), in the order they should be drawn. No prose, no code fences.",
+    "Board: 1000x600 units, origin top-left. Text flows into free space automatically when you leave out x and y; do that for most writing. Give x,y only for diagrams, and keep clear of the elements listed under 'On board'.",
+    "Steps (fields in braces are optional):",
+    '{"op":"write","kind":"text"|"math","content":"...","size":"title"|"body"|"small","color":C,"id":"name","cue":"2-5 words from the teacher\u0027s turn",x,y,w}',
+    '{"op":"graph","id":"g","x","y","w","h","xmin","xmax","ymin","ymax","xlabel","ylabel","grid":true}   then   {"op":"plot","graph":"g","fn":"x^2-3*x+1","color":C,"label":"short"}   {"op":"point","graph":"g","px","py","label","color":C}',
+    '{"op":"shape","shape":"line"|"arrow"|"polyline"|"polygon"|"curve","points":[[x,y],...],"color":C,"dashed":true,"id":"name"}   {"op":"shape","shape":"rect","x","y","w","h"}   {"op":"shape","shape":"circle","x","y","r"}   {"op":"shape","shape":"ellipse","x","y","rx","ry"}   (add "fill":true to tint closed shapes)',
+    '{"op":"highlight","target":"id","color":C}   {"op":"erase","target":"id"|"all"}   {"op":"correct","target":"id","with":{a write or shape step}}   {"op":"clear"}   {"op":"pause","ms":500}',
+    "C is one of ink, blue, red, green, amber, violet (ink by default). Add to the board; never redraw what is already there. Use clear only when the subject changes. Fix a mistake with correct. Highlight only things that exist.",
+    "Math (kind=math) is LaTeX, supported: + - = < > ( ) [ ] / digits, letters, ^ and _ for powers and indices, \\frac{a}{b}, \\sqrt{x}, \\sqrt[3]{x}, \\sum_{i=1}^{n}, \\int_a^b, \\lim_{x \\to 0}, \\sin \\cos \\tan \\log \\ln, \\pm \\times \\cdot \\div \\leq \\geq \\neq \\approx \\infty \\to \\rightarrow \\Rightarrow \\circ \\partial \\nabla, Greek (\\alpha \\beta \\pi \\theta \\Delta ...), \\vec{v} \\bar{x} \\hat{x}, \\text{words}, \\left( \\right). Do not use matrices, \\begin{...}, tables or colors inside LaTeX; write separate lines instead.",
+    "Text may be in the language the teacher speaks, using Latin letters with accents. Chemistry: write formulas as math, e.g. H_2O, CO_2.",
+    "Graphs: plot functions with explicit * and ^ (e.g. 2*x+1, sin(x), x^2). Diagrams: build from shapes plus short text labels placed next to them.",
+    "Give the first step quickly: the board starts drawing as soon as your first line arrives. If the turn is small talk or nothing visual would help, output nothing at all.",
   ].join("\n");
 
   function summariseBoard(items) {
@@ -316,34 +287,81 @@
   }
 
   /** The user message for the planner. Only the last few turns are sent, to keep tokens and latency low. */
-  function buildPlannerMessage(turns, boardItems, nextSlot) {
+  function buildPlannerMessage(turns, boardItems, nextSlot, hint) {
     const recent = (turns || []).slice(-6).map((t) => (t.role === "teacher" ? "Teacher: " : "Student: ") + String(t.text).slice(0, 500));
     const slot = nextSlot ? "\nNext free text slot: x=" + Math.round(nextSlot.x) + " y=" + Math.round(nextSlot.y) : "";
-    return "On board:\n" + summariseBoard(boardItems) + slot + "\n\nConversation (oldest first):\n" + recent.join("\n");
+    const request = hint ? "\n\nThe teacher also asked for this to be shown on the board (draw it step by step, shorter if it is long): " + String(hint).slice(0, 600) : "";
+    return "On board:\n" + summariseBoard(boardItems) + slot + "\n\nConversation (oldest first):\n" + recent.join("\n") + request;
   }
 
   /**
-   * Ask Claude what to draw. Resolves to { ops, errors } with ops already validated.
-   * Throws on network or auth problems so the caller can fall back to the classic board.
+   * Ask Claude what to draw and receive the steps as they are written. Each complete line is validated and handed to
+   * onOps straight away, so the first stroke can start while Claude is still writing the rest.
+   * Resolves to { ops, errors, usage } when the stream ends. Throws on network or auth problems (error.status is set
+   * for HTTP errors) so the caller can fall back to the classic board; an aborted request throws an AbortError.
    */
-  async function planBoard({ apiKey, turns, boardItems, nextSlot, graphIds, fetchImpl, signal, model }) {
+  async function planBoardStream({ apiKey, turns, boardItems, nextSlot, graphIds, hint, fetchImpl, signal, model, onOps }) {
     const doFetch = fetchImpl || fetch;
     const response = await doFetch("https://api.anthropic.com/v1/messages", {
       method: "POST", signal,
       headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
       body: JSON.stringify({
-        model: model || PLANNER_MODEL, max_tokens: 1800, system: PLANNER_SYSTEM,
-        tools: [TOOL_SCHEMA], tool_choice: { type: "tool", name: TOOL_SCHEMA.name },
-        messages: [{ role: "user", content: buildPlannerMessage(turns, boardItems, nextSlot) }],
+        model: model || PLANNER_MODEL, max_tokens: 1200, stream: true, system: PLANNER_SYSTEM,
+        messages: [{ role: "user", content: buildPlannerMessage(turns, boardItems, nextSlot, hint) }],
       }),
     });
     if (!response.ok) { const error = new Error("Planner request failed: " + response.status); error.status = response.status; throw error; }
-    const data = await response.json();
-    const block = (data.content || []).find((b) => b.type === "tool_use" && b.name === TOOL_SCHEMA.name);
-    if (!block) return { ops: [], errors: ["Planner returned no tool call"], usage: data.usage };
-    const ids = (boardItems || []).map((item) => item.id);
-    const result = validatePlan(block.input, { ids, graphs: graphIds || [] });
-    return { ...result, usage: data.usage };
+
+    const validator = createValidator({ ids: (boardItems || []).map((item) => item.id), graphs: graphIds || [] });
+    const ops = [], errors = []; let usage = null, lineBuffer = "";
+
+    function handleLine(rawLine) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("```")) return null;
+      if (line[0] !== "{") { errors.push("ignored non-JSON line: " + line.slice(0, 60)); return null; }
+      let parsed;
+      try { parsed = JSON.parse(line); } catch (error) { errors.push("bad JSON line: " + line.slice(0, 60)); return null; }
+      const { op, error } = validator.validate(parsed);
+      if (error) errors.push(error);
+      return op;
+    }
+    function consumeText(chunk, flush) {
+      lineBuffer += chunk;
+      const lines = lineBuffer.split("\n");
+      lineBuffer = flush ? "" : lines.pop();
+      const batch = [];
+      for (const line of lines) { const op = handleLine(line); if (op) batch.push(op); }
+      if (batch.length) { ops.push(...batch); if (onOps) onOps(batch); }
+    }
+
+    if (response.body && response.body.getReader) {
+      const reader = response.body.getReader(), decoder = new TextDecoder();
+      let pending = "";
+      const handleEvent = (payload) => {
+        let event;
+        try { event = JSON.parse(payload); } catch (error) { return; }
+        if (event.type === "content_block_delta" && event.delta && event.delta.type === "text_delta") consumeText(event.delta.text, false);
+        else if (event.type === "message_start" && event.message) usage = event.message.usage || usage;
+        else if (event.type === "message_delta" && event.usage) usage = { ...(usage || {}), ...event.usage };
+        else if (event.type === "error") { const error = new Error("Planner stream error: " + ((event.error && event.error.message) || "unknown")); error.status = (event.error && event.error.type) === "overloaded_error" ? 529 : 500; throw error; }
+      };
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        let newline;
+        while ((newline = pending.indexOf("\n")) >= 0) {
+          const line = pending.slice(0, newline).replace(/\r$/, ""); pending = pending.slice(newline + 1);
+          if (line.startsWith("data:")) { const payload = line.slice(5).trim(); if (payload && payload !== "[DONE]") handleEvent(payload); }
+        }
+      }
+    } else { // no streaming available: take the whole answer at once
+      const data = await response.json();
+      usage = data.usage || null;
+      consumeText((data.content || []).filter((b) => b.type === "text").map((b) => b.text).join(""), false);
+    }
+    consumeText("", true); // the last line has no newline after it: process what is left
+    return { ops, errors, usage };
   }
 
   /* ---------- Pacing against the voice ---------- */
@@ -378,8 +396,8 @@
   }
 
   return {
-    BOARD, COLORS, SIZES, SHAPES, OPS, LIMITS, PLANNER_MODEL, TOOL_SCHEMA, PLANNER_SYSTEM,
-    compileExpression, validatePlan, buildPlannerMessage, planBoard,
+    BOARD, COLORS, SIZES, SHAPES, OPS, LIMITS, PLANNER_MODEL, PLANNER_SYSTEM,
+    compileExpression, createValidator, validatePlan, buildPlannerMessage, planBoardStream,
     estimateSpeechMs, normalizeSpeech, cueSpoken, niceTicks,
   };
 });
