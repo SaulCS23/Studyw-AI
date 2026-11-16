@@ -6,6 +6,11 @@
 <title>Talking Teacher Live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=Kalam:wght@400;700&display=swap">
+<!-- Animated whiteboard: KaTeX writes the equations (pinned version + integrity hash); the two local scripts are the drawing engine. -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV" crossorigin="anonymous">
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js" integrity="sha384-XjKyOOlGwcjNTAIQHIpgOno0Hl1YQqzUOEleOLALmuqehneUG+vnGctmUb0ZY0l8" crossorigin="anonymous"></script>
+<script defer src="whiteboard-core.js"></script>
+<script defer src="whiteboard.js"></script>
 <style>
 /* Layout: the whiteboard fills the room, subtitles under it, one big call button along the bottom. */
 :root{
@@ -48,6 +53,9 @@ button{font:inherit}
 .board.fresh{animation:wipe .45s ease-out}
 @keyframes wipe{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
 @media (prefers-reduced-motion:reduce){.board.fresh{animation:none}}
+/* The animated board shares the classic board's frame; only one of the two shows at a time. */
+[hidden]{display:none!important}
+.wbboard{padding:0;overflow:hidden}
 .caption{background:var(--caption-bg);color:var(--caption-ink);border-radius:10px;padding:12px 18px;min-height:3.6em;font-size:1.3rem;line-height:1.4;text-align:center;text-wrap:balance}
 .caption.you{font-style:italic;opacity:.85}
 .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
@@ -86,6 +94,7 @@ code{background:var(--bg);padding:1px 6px;border-radius:5px}
     <p>I'll draw on this board while I explain.</p>
     <p class="hl">Interrupt me whenever you want. I'll stop and listen.</p>
   </div>
+  <div class="board wbboard" id="wbBoard" hidden></div>
 
   <div class="caption" id="caption">Subtitles will appear here.</div>
 
@@ -122,6 +131,9 @@ The student can see a whiteboard next to you. Whatever you explain gets sketched
       <li>For the whiteboard, paste your <b>Anthropic API key</b> here. The app uses it to sketch what the teacher is explaining. It stays on this laptop only.
         <label for="anthropicKey" style="margin-top:6px">Anthropic API key<input id="anthropicKey" type="password" placeholder="sk-ant-..." autocomplete="off"></label>
       </li>
+      <li>Choose how the whiteboard draws. <b>Animated</b> writes and draws step by step while the teacher talks and adds to what is already on the board. <b>Classic</b> replaces the board with a finished sketch after each turn.
+        <label for="boardStyle" style="margin-top:6px">Whiteboard style<select id="boardStyle"><option value="animated">Animated (writes as the teacher talks)</option><option value="classic">Classic (whole sketch at once)</option></select></label>
+      </li>
     </ol>
     <p class="small">The free plan includes about 15 minutes of talking per month. That's enough to try it out. Use headphones or speakers, either works; this one handles echo for you.</p>
     <div style="display:flex;justify-content:flex-end"><button class="btn solid" type="button" id="saveSetup">Save</button></div>
@@ -147,8 +159,8 @@ const $ = id => document.getElementById(id);
 const app = $("app"), boardEl = $("board"), captionEl = $("caption"), statusEl = $("status");
 let convo = null;
 
-try { $("agentId").value = localStorage.getItem("ttl-agent") || ""; $("anthropicKey").value = localStorage.getItem("ttl-akey") || ""; } catch(e){}
-$("setup").addEventListener("close", () => { try { localStorage.setItem("ttl-agent", $("agentId").value.trim()); localStorage.setItem("ttl-akey", $("anthropicKey").value.trim()); } catch(e){} });
+try { $("agentId").value = localStorage.getItem("ttl-agent") || ""; $("anthropicKey").value = localStorage.getItem("ttl-akey") || ""; $("boardStyle").value = localStorage.getItem("ttl-board") === "classic" ? "classic" : "animated"; } catch(e){}
+$("setup").addEventListener("close", () => { try { localStorage.setItem("ttl-agent", $("agentId").value.trim()); localStorage.setItem("ttl-akey", $("anthropicKey").value.trim()); localStorage.setItem("ttl-board", $("boardStyle").value); } catch(e){} });
 $("openSetup").onclick = () => $("setup").showModal();
 $("saveSetup").onclick = () => { $("setup").close(); statusEl.textContent = $("agentId").value.trim() ? "Saved. Press Start lesson." : "Add your Agent ID in Setup to start."; };
 document.querySelectorAll("[data-copy]").forEach(b => b.onclick = async () => {
@@ -179,8 +191,22 @@ function sanitize(html){
   return doc.body.firstChild.innerHTML;
 }
 function showBoard(html){
+  showSurface("classic");
   boardEl.classList.remove("fresh"); void boardEl.offsetWidth;
   boardEl.innerHTML = sanitize(html); boardEl.classList.add("fresh"); boardEl.scrollTop = 0;
+}
+
+/* Animated whiteboard (ai-teacher/whiteboard.js). The classic board above stays as the fallback:
+   it is used when "Classic" is chosen in Setup, when the engine fails to load, and when Claude's drawing
+   instructions can't be used. Drawn content is kept when switching back and forth. */
+const wbHost = $("wbBoard"); let whiteboard = null, turnStartedAt = 0;
+function useAnimatedBoard(){ return $("boardStyle").value === "animated" && !!(window.Whiteboard && window.WhiteboardCore); }
+function getWhiteboard(){ if (!whiteboard && window.Whiteboard && window.WhiteboardCore) whiteboard = new window.Whiteboard(wbHost); return whiteboard; }
+function showSurface(which){ boardEl.hidden = which !== "classic"; wbHost.hidden = which !== "animated"; }
+/* The student spoke or typed: stop outdated drawing, keep what is already on the board. */
+function interruptBoard(){
+  if (whiteboard) whiteboard.cancelPending();
+  if (useAnimatedBoard()){ boardReq++; clearTimeout(boardTimer); } // a plan still being written is out of date too
 }
 
 /* Auto whiteboard: after each teacher turn, Claude sketches what was just explained. */
@@ -193,7 +219,30 @@ function noteMessage(role, text){
 }
 function scheduleBoard(){
   clearTimeout(boardTimer);
-  boardTimer = setTimeout(drawBoard, 400);
+  boardTimer = setTimeout(() => (useAnimatedBoard() ? drawAnimatedBoard() : drawBoard()), 400);
+}
+/* After each teacher turn, a separate Claude call returns drawing instructions (checked against a strict schema
+   in whiteboard-core.js), and the engine draws them step by step, paced to how long the teacher will keep talking. */
+async function drawAnimatedBoard(){
+  const key = $("anthropicKey").value.trim();
+  if (!key || toolUsedThisTurn) return;
+  const board = getWhiteboard(), my = ++boardReq;
+  try {
+    const plan = await window.WhiteboardCore.planBoard({ apiKey: key, turns: transcript, boardItems: board.summary(), nextSlot: board.nextSlot(), graphIds: board.graphIds() });
+    if (my !== boardReq) return; // the student spoke while Claude was thinking, or a newer turn arrived
+    if (plan.errors.length) console.warn("Whiteboard: some drawing instructions were rejected", plan.errors);
+    if (!plan.ops.length){
+      if (plan.errors.length){ statusEl.textContent = "Whiteboard: using the classic board for this turn."; await drawBoard(); }
+      return; // nothing new worth drawing
+    }
+    const lastTeacher = [...transcript].reverse().find(m => m.role === "teacher");
+    const speechLeft = window.WhiteboardCore.estimateSpeechMs(lastTeacher ? lastTeacher.text : "") - (Date.now() - turnStartedAt);
+    showSurface("animated"); // must be visible before drawing so text can be measured
+    board.enqueue(plan.ops, { budgetMs: Math.max(1500, speechLeft) });
+  } catch(e){
+    if (e && e.status === 401){ statusEl.textContent = "Whiteboard: the Anthropic key didn't work. Check it in Setup."; return; }
+    if (my === boardReq) await drawBoard(); // the classic board is the safety net
+  }
 }
 async function drawBoard(){
   const key = $("anthropicKey").value.trim();
@@ -245,17 +294,25 @@ async function start(isRetry){
           lastProblem = "Problem (" + connType + "): " + describe(d.message || ("closed by " + d.reason), { ...(d.context || {}), closeCode: d.closeCode, closeReason: d.closeReason });
         if (lastProblem){ problems.push(lastProblem); statusEl.textContent = problems.join("  ||  "); }
         const retry = !heardAgent && !!lastProblem && connType === "websocket";
-        convo = null; $("call").classList.remove("live"); $("callWord").textContent = "Start lesson"; setMode("idle");
+        convo = null; $("call").classList.remove("live"); $("callWord").textContent = "Start lesson"; setMode("idle"); interruptBoard();
         if (retry){ connType = "webrtc"; statusEl.textContent += " · Trying another way to connect..."; setTimeout(() => start(true), 600); }
       },
-      onModeChange: ({ mode }) => setMode(mode === "speaking" ? "speaking" : "listening"),
+      onModeChange: ({ mode }) => {
+        if (mode === "speaking" && app.dataset.mode !== "speaking"){ turnStartedAt = Date.now(); if (whiteboard) whiteboard.beginTurn(); } // a new spoken turn begins
+        setMode(mode === "speaking" ? "speaking" : "listening");
+      },
+      // The agent was cut off by the student: stop drawing whatever was still queued.
+      onInterruption: () => interruptBoard(),
+      // Fires as each piece of the teacher's voice actually plays, if the agent sends character timing.
+      // When it does, drawing steps wait for the words they belong to. When it doesn't, drawing is paced by time.
+      onAudioAlignmentPlayback: (e) => { const chars = e && e.alignment && e.alignment.chars; if (whiteboard && Array.isArray(chars)) whiteboard.speechProgress(chars.join("")); },
       onMessage: (m) => {
         const text = m?.message ?? ""; if (!text) return;
         const fromYou = m.source === "user" || m.role === "user";
         captionEl.classList.toggle("you", fromYou);
         captionEl.textContent = fromYou ? "You: " + text : text;
         if (!fromYou) heardAgent = true;
-        if (fromYou){ toolUsedThisTurn = false; noteMessage("student", text); }
+        if (fromYou){ interruptBoard(); toolUsedThisTurn = false; noteMessage("student", text); }
         else { noteMessage("teacher", text); scheduleBoard(); }
       },
       onError: (msg, ctx) => { lastProblem = "Problem (" + connType + "): " + describe(typeof msg === "string" ? msg : (msg?.message || String(msg)), ctx); statusEl.textContent = problems.concat(lastProblem).join("  ||  "); console.error(lastProblem, ctx); }
@@ -271,7 +328,7 @@ $("call").onclick = async () => { if (convo){ await convo.endSession(); } else {
 $("typed").addEventListener("input", () => { if (convo) convo.sendUserActivity(); });
 function sendTyped(){ const q = $("typed").value.trim(); if (!q) return;
   if (!convo){ statusEl.textContent = "Press Start lesson first."; return; }
-  convo.sendUserMessage(q); $("typed").value = ""; toolUsedThisTurn = false; noteMessage("student", q);
+  convo.sendUserMessage(q); $("typed").value = ""; interruptBoard(); toolUsedThisTurn = false; noteMessage("student", q);
   captionEl.classList.add("you"); captionEl.textContent = "You: " + q;
 }
 $("sendBtn").onclick = sendTyped;

@@ -57,6 +57,9 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 /            → root config, this file, README
 /ai-teacher/          → talking AI teacher, ElevenLabs version (open index.html; see its README)
 /ai-teacher/laptop/   → earlier version: Anthropic API + browser voices
+/ai-teacher/whiteboard-core.js → animated whiteboard: schema check, safe maths parser, Claude planner call
+/ai-teacher/whiteboard.js      → animated whiteboard: SVG renderer with drawing queue and interruption
+/ai-teacher/test/     → whiteboard tests and simulated lessons (not used by the product)
 /student-website/     → clickable prototype of the school site (browser-only data, not secure yet)
 ```
 
@@ -64,7 +67,7 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 <!-- TODO: fill in once the project is scaffolded -->
 - Install: ``
 - Run locally: ``
-- Test: ``
+- Test: `node --test ai-teacher/test/core.test.js` and `node ai-teacher/test/integration.mjs` (needs Chrome); `ai-teacher/test/browser.html?selftest` in a browser
 - Lint / format: ``
 
 ## How we work (rules for humans AND Claude)
@@ -97,3 +100,4 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 - 2026-11-09: Next milestone: deploy the site with real, secure, role-based logins.
 - 2026-11-09: AI teacher prototype added in /ai-teacher: ElevenLabs agent (Claude as LLM) for voice and interruptions, Claude via the Anthropic API for the whiteboard. Keys are entered in the browser, never committed.
 - 2026-11-10: Student website prototype added in /student-website. Data and roles live in the browser only, so it is a design reference until the real backend exists.
+- 2026-11-16: Animated whiteboard added to the ElevenLabs teacher: a separate Claude call returns schema-checked drawing steps, drawn progressively as SVG (KaTeX approved for equations). The classic whole-sketch board stays as the fallback. Voice sync is time-estimated unless the agent sends character timing.
