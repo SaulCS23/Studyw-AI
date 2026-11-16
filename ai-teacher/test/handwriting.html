@@ -59,6 +59,7 @@ label{display:inline-flex;gap:6px;align-items:center;color:var(--muted)}
 </main>
 <script src="../whiteboard-font.js"></script>
 <script src="../whiteboard-hand.js"></script>
+<script src="../whiteboard-layout.js"></script>
 <script src="../whiteboard-core.js"></script>
 <script src="../whiteboard.js"></script>
 <script src="fixtures.js"></script>
@@ -81,9 +82,9 @@ $("speed").onchange = () => { wb.timeScale = Number($("speed").value); };
 $("colors").onchange = () => { wb.debugStrokeColors = $("colors").checked; };
 
 function play(board, turn) {
-  const { ops, errors } = core.validatePlan({ ops: turn.ops }, { ids: board.summary().map((i) => i.id), graphs: board.graphIds() });
+  const { ops, errors } = core.validatePlan({ ops: turn.ops }, board.context());
   if (errors.length) logSink("warn", "rejected: " + errors.join("; "));
-  board.enqueue(ops);
+  board.enqueue(ops.map(({ cue, ...step }) => step)); // this page is about the pen, not about syncing to speech: draw each step at once
   return ops;
 }
 async function playTurns(board, turns) { for (const turn of turns) { play(board, turn); await board.idle(); } }
@@ -114,7 +115,7 @@ if (params.has("selftest")) selfTest();
 async function selfTest() {
   const out = []; let failures = 0;
   const check = (name, ok, detail) => { if (!ok) failures++; out.push((ok ? "PASS  " : "FAIL  ") + name + (!ok && detail !== undefined ? "  -> " + detail : "")); $("results").textContent = out.join("\n"); };
-  const ops = (list, board) => core.validatePlan({ ops: list }, board ? { ids: board.summary().map((i) => i.id), graphs: board.graphIds() } : undefined).ops;
+  const ops = (list, board) => core.validatePlan({ ops: list }, board ? board.context() : undefined).ops;
   const pathsOf = (item) => [...item.g.querySelectorAll("path")];
   const sample = (item) => {
     const paths = pathsOf(item); let done = 0, hidden = 0, partial = 0;
@@ -165,7 +166,7 @@ async function selfTest() {
     makeBoard({ timeScale: 30 });
     wb.enqueue(ops(lesson.turns[1].ops.slice(1)));
     await wb.idle();
-    const graph = wb.items.get("g");
+    const graph = wb.items.get("gg");
     check("graph numbers and axis labels are handwritten strokes", !graph.g.querySelector("text") && graph.g.querySelectorAll("[data-wb-hand]").length >= 2, graph.g.querySelectorAll("text").length + " <text> elements");
     check("curve labels and point labels are handwritten too", !wb.svg.querySelector("text") && wb.items.get("sine").g.querySelector("[data-wb-hand]") && wb.items.get("o").g.querySelector("[data-wb-hand]"));
 

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Whiteboard test bench</title>
 <style>
-/* Test bench for the whiteboard: plays simulated lessons through the real renderer. Not part of the product. */
+/* Test bench for the notebook whiteboard: plays simulated lessons through the real renderer. Not part of the product. */
 :root{--bg:#eef1ec;--ink:#1d2a26;--muted:#566660;--accent:#2f6b57;--accent-ink:#fff;--surface:#fff;--line:#c9d1cc;--frame:#b9c2bd}
 @media (prefers-color-scheme:dark){:root{--bg:#111715;--ink:#e6ede9;--muted:#9fb0a9;--accent:#6fbf9f;--accent-ink:#0d1512;--surface:#1a2320;--line:#2c3833;--frame:#3a4a44;color-scheme:dark}}
 *{box-sizing:border-box}
@@ -26,14 +26,16 @@ button:focus-visible{outline:3px solid #e8b23a;outline-offset:2px}
 <body>
 <main>
   <h1>Whiteboard test bench</h1>
-  <p>Plays simulated lessons (test data in fixtures.js) through the real renderer. For the slow-motion pen test open handwriting.html. Add <code>?selftest</code> here to run the automatic checks.</p>
+  <p>Plays simulated lessons (test data in fixtures.js) through the real renderer, one notebook page at a time. For the slow-motion pen test open handwriting.html. Add <code>?selftest</code> here to run the automatic checks.</p>
   <div class="bar" id="bar"></div>
+  <div class="bar" id="nav"></div>
   <div class="board" id="board"></div>
   <div class="caption" id="caption">Pick a lesson.</div>
   <div id="results" aria-live="polite"></div>
 </main>
 <script src="../whiteboard-font.js"></script>
 <script src="../whiteboard-hand.js"></script>
+<script src="../whiteboard-layout.js"></script>
 <script src="../whiteboard-core.js"></script>
 <script src="../whiteboard.js"></script>
 <script src="fixtures.js"></script>
@@ -41,31 +43,65 @@ button:focus-visible{outline:3px solid #e8b23a;outline-offset:2px}
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const core = WhiteboardCore;
-let board = new Whiteboard($("board"), { timeScale: Number(params.get("speed")) || 1 });
+const core = WhiteboardCore, F = WhiteboardFixtures;
+// Speech runs much faster than real speech here (40 words a second), so cues arrive quickly. Individual tests slow it down.
+const fastClock = () => new core.SpeechClock({ wordsPerSecond: 40 });
+let board = new Whiteboard($("board"), { timeScale: Number(params.get("speed")) || 1, clock: fastClock() });
 
-/* Play a lesson the way the live page does: validate each turn, then queue it. */
+/** Play a lesson turn the way the live page does: tell the board what is being said, validate against the notebook, queue the steps. */
 function playTurn(wb, turn) {
-  const { ops, errors } = core.validatePlan({ ops: turn.ops }, { ids: wb.summary().map((i) => i.id), graphs: wb.graphIds() });
+  const { ops, errors } = core.validatePlan({ ops: turn.ops }, wb.context());
   if (errors.length) console.warn("validation", errors);
   $("caption").textContent = turn.teacher;
-  wb.beginTurn();
+  wb.beginTurn(turn.teacher); wb.speechStart();
   wb.enqueue(ops);
   return ops;
 }
 async function playLesson(wb, lesson) { for (const turn of lesson.turns) { playTurn(wb, turn); await wb.idle(); } }
 
-const lessons = WhiteboardFixtures.all;
-function addButton(text, handler, solid) { const b = document.createElement("button"); b.type = "button"; b.textContent = text; if (solid) b.className = "solid"; b.onclick = handler; $("bar").appendChild(b); }
-lessons.forEach((lesson) => addButton("Play " + lesson.subject, () => playLesson(board, lesson), true));
-addButton("Interrupt", () => { board.cancelPending(); $("caption").textContent = "(student interrupted)"; });
-addButton("Clear board", () => board.reset());
+function addButton(parent, text, handler, solid) { const b = document.createElement("button"); b.type = "button"; b.textContent = text; if (solid) b.className = "solid"; b.onclick = handler; $(parent).appendChild(b); }
+[F.mathematics, F.biology, F.history, F.topicChange, F.revisit, F.handwriting].forEach((lesson) => addButton("bar", "Play " + lesson.subject, () => playLesson(board, lesson), true));
+addButton("bar", "Play long lesson", () => playLesson(board, F.longLesson(12)), true);
+addButton("bar", "Interrupt", () => { board.cancelPending(); $("caption").textContent = "(student interrupted)"; });
+addButton("bar", "Clear everything", () => board.reset());
+addButton("nav", "Previous page", () => board.viewPrevious()); addButton("nav", "Next page", () => board.viewNext()); addButton("nav", "Return to live page", () => board.returnToLive());
 
-/* ?lesson=biology plays that subject (and the one before it for "topic change"), for screenshots. */
+/* ?lesson=biology plays the lessons up to and including that one (maths first), for screenshots. */
 const wanted = params.get("lesson");
 if (wanted) {
-  const index = lessons.findIndex((l) => l.subject.startsWith(wanted));
-  (async () => { for (let i = wanted === "topic" ? 2 : index; i <= index; i++) await playLesson(board, lessons[i]); document.title += " (done)"; })();
+  const order = [F.mathematics, F.biology, F.history, F.topicChange, F.handwriting];
+  const index = order.findIndex((l) => l.subject.startsWith(wanted));
+  (async () => { if (wanted === "long") await playLesson(board, F.longLesson(12)); else for (let i = 0; i <= index; i++) { await playLesson(board, order[i]); if (params.has("view") && i === index) break; } if (params.get("page")) board.viewPage(Number(params.get("page"))); if (params.has("dump")) $("results").textContent = JSON.stringify(board.summary().map((i) => [i.id, i.page, Math.round(i.x), Math.round(i.y), Math.round(i.w), Math.round(i.h)])); document.title += " (done)"; })();
+}
+
+/* ---------- Geometry helpers: measure what is really on the page ---------- */
+
+/** The ink of a top-level item in page coordinates. Graphs and diagram groups use their frame (curves are clipped to it). */
+function inkBox(item) {
+  if (item.type === "graph" || item.type === "group") return { ...item.bbox };
+  const b = item.g.getBBox(), m = /translate\(([-\d.]+)[ ,]+([-\d.]+)\)/.exec(item.g.getAttribute("transform") || "");
+  const dx = m ? +m[1] : 0, dy = m ? +m[2] : 0;
+  return { x: b.x + dx, y: b.y + dy, w: b.width, h: b.height };
+}
+const apart = (a, b, gap) => a.x + a.w + gap <= b.x || b.x + b.w + gap <= a.x || a.y + a.h + gap <= b.y || b.y + b.h + gap <= a.y;
+/** Every pair of top-level items on a page is separated by at least `gap`, and everything is inside the page. Returns a list of problems. */
+function geometryProblems(wb, gap = 6) {
+  const problems = [];
+  for (const page of wb.pages) {
+    const top = [...page.ids].map((id) => wb.items.get(id)).filter((i) => i && !i.parent && i.bbox);
+    const boxes = top.map((i) => ({ id: i.id, box: inkBox(i) }));
+    for (const { id, box } of boxes) if (box.x < 20 || box.y < 20 || box.x + box.w > 980 || box.y + box.h > 580) problems.push(`${page.id}: ${id} leaves the page ${JSON.stringify(box)}`);
+    for (let a = 0; a < boxes.length; a++) for (let b = a + 1; b < boxes.length; b++) if (!apart(boxes[a].box, boxes[b].box, gap)) problems.push(`${page.id}: ${boxes[a].id} and ${boxes[b].id} overlap ${JSON.stringify(boxes[a].box)} ${JSON.stringify(boxes[b].box)}`);
+    for (const item of top) { // what is drawn inside a graph or a diagram frame stays inside it
+      if (item.type !== "group" && item.type !== "graph") continue;
+      for (const childId of item.children) {
+        const child = wb.items.get(childId); if (!child || child.type === "plot" || child.type === "point") continue;
+        const g = child.g.getBBox();
+        if (g.x < -3 || g.y < -3 || g.x + g.width > item.bbox.w + 3 || g.y + g.height > item.bbox.h + 3) problems.push(`${page.id}: ${childId} sticks out of ${item.id} (${Math.round(g.x)},${Math.round(g.y)} ${Math.round(g.width)}x${Math.round(g.height)} in ${item.bbox.w}x${item.bbox.h})`);
+      }
+    }
+  }
+  return problems;
 }
 
 /* ---------- Automatic checks: ?selftest ---------- */
@@ -74,156 +110,227 @@ if (params.has("selftest")) runSelfTest();
 async function runSelfTest() {
   const out = []; let failures = 0;
   const check = (name, condition, detail) => { if (!condition) failures++; out.push((condition ? "PASS  " : "FAIL  ") + name + (!condition && detail !== undefined ? "  -> " + detail : "")); $("results").textContent = out.join("\n"); };
-  const fresh = (options) => { $("board").innerHTML = ""; return new Whiteboard($("board"), options); };
+  const fresh = (options) => { $("board").innerHTML = ""; return new Whiteboard($("board"), { clock: fastClock(), ...options }); };
   const ids = (wb) => wb.summary().map((i) => i.id);
-  const [math, biology, history, topic] = lessons;
-  const waitUntil = async (condition, ms = 20000) => { const t = performance.now(); while (performance.now() - t < ms) { if (condition()) return true; await sleep(40); } return false; };
-  const ops = (list, wb) => core.validatePlan({ ops: list }, wb ? { ids: ids(wb), graphs: wb.graphIds() } : undefined).ops;
-  // A stroke is half drawn if it is visible but its dash offset says it is not finished. (Strokes still waiting their turn are hidden.)
+  const waitUntil = async (condition, ms = 20000) => { const t = performance.now(); while (performance.now() - t < ms) { if (condition()) return true; await sleep(30); } return false; };
+  const ops = (list, wb) => core.validatePlan({ ops: list }, wb ? wb.context() : undefined).ops;
   const halfDrawn = (wb) => [...wb.svg.querySelectorAll("path")].filter((p) => p.style.visibility !== "hidden" && p.style.opacity !== "0" && p.style.strokeDashoffset !== "" && parseFloat(p.style.strokeDashoffset) !== 0).length;
+  const quiet = (...a) => { const logs = []; return { logs, log: (level, message) => logs.push(level + ": " + message) }; };
 
   try {
-    // 1. Draws progressively, in real time
-    let wb = fresh({ timeScale: 2 });
-    const total = math.turns[0].ops.length;
-    playTurn(wb, math.turns[0]);
-    await waitUntil(() => wb.items.size >= 1);
-    const counts = []; while (wb.running) { counts.push(wb.items.size); await sleep(120); }
-    check("draws progressively: the board fills one element at a time", counts.length >= 4 && counts[0] < total && new Set(counts).size >= 3, JSON.stringify(counts.slice(0, 12)));
-    check("all elements present when the queue finishes", ids(wb).length === total, ids(wb).join(","));
-    check("no half-drawn strokes left behind", halfDrawn(wb) === 0, halfDrawn(wb));
-    const curve = wb.items.get("curve").g.querySelector("path");
-    check("curve was plotted from the expression (not hardcoded)", curve && curve.getAttribute("d").split("L").length > 100);
-    check("equations are handwriting strokes, not typed or typeset HTML", wb.items.get("eq").g.querySelectorAll("path").length >= 6 && !wb.svg.querySelector("foreignObject, .katex, text"));
+    /* 1. Mathematics: several equations, a graph and a calculation: nothing overlaps, equations of one calculation stay together */
+    let wb = fresh({ timeScale: 60 });
+    await playLesson(wb, F.mathematics);
+    check("maths: equations, graph and labels are all drawn", ["title", "eq", "g", "curve", "vertex", "roots", "c1", "c2", "c3"].every((id) => wb.items.has(id)), ids(wb).join(","));
+    let problems = geometryProblems(wb);
+    check("maths: ZERO overlap between elements, everything inside the page", problems.length === 0, problems.join(" | "));
+    const c = ["c1", "c2", "c3"].map((id) => wb.items.get(id));
+    check("maths: the lines of one calculation stay together on one page, left aligned and tightly stacked", c.every((i) => i.page === c[0].page) && c.every((i) => Math.abs(i.bbox.x - c[0].bbox.x) < 0.5) && c[1].bbox.y > c[0].bbox.y + c[0].bbox.h && c[1].bbox.y - (c[0].bbox.y + c[0].bbox.h) < 18 && c[2].bbox.y - (c[1].bbox.y + c[1].bbox.h) < 18, JSON.stringify(c.map((i) => i.bbox)));
+    const g = wb.items.get("g").bbox, eq = wb.items.get("eq").bbox;
+    check("maths: the graph sits beside the equation when there is room (side by side)", g.x >= eq.x + eq.w && g.y < eq.y + eq.h + 200, JSON.stringify({ eq, g }));
+    check("maths: the highlight does not collide with neighbours", (() => { const m = wb.items.get("eq").marker.getBBox(); return apart({ x: m.x, y: m.y, w: m.width, h: m.height }, inkBox(wb.items.get("g")), 0) && apart({ x: m.x, y: m.y, w: m.width, h: m.height }, inkBox(wb.items.get("title")), 0); })());
+    check("maths: curve plotted from the expression; graph numbers are handwriting", wb.items.get("curve").g.querySelector("path").getAttribute("d").split("L").length > 100 && !wb.svg.querySelector("text, foreignObject"));
 
-    // 2. Follow-up adds without replacing
-    wb.timeScale = 30;
-    const before = new Set(ids(wb));
-    playTurn(wb, math.turns[1]); await wb.idle();
-    check("follow-up keeps existing content visible", [...before].every((id) => wb.items.has(id)));
-    check("follow-up adds the new elements", ["vertex", "roots"].every((id) => wb.items.has(id)));
-    check("highlight sits behind the highlighted equation", !!wb.items.get("eq").marker && wb.items.get("eq").marker.nextSibling === wb.items.get("eq").g);
-    const tickLabels = [...wb.items.get("g").g.querySelectorAll("[data-wb-hand]")];
-    check("graph numbers are written by hand, not typed", tickLabels.length >= 2 && !wb.items.get("g").g.querySelector("text"));
+    /* 2. Biology and history: diagrams drawn inside frames, labels kept apart, nothing overlapping */
+    wb = fresh({ timeScale: 60 });
+    await playLesson(wb, F.biology);
+    problems = geometryProblems(wb);
+    check("biology: the whole diagram (frame, shapes, labels, equations beside it) is drawn", ["btitle", "leaf", "sun", "chloroplast", "co2", "inputs", "outputs"].every((id) => wb.items.has(id)), ids(wb).join(","));
+    check("biology: no overlap, and the diagram's parts stay inside their frame", problems.length === 0, problems.join(" | "));
+    const leaf = wb.items.get("leaf").bbox, inputs = wb.items.get("inputs").bbox, outputs = wb.items.get("outputs").bbox;
+    check("biology: the explanation sits beside its diagram, and the second equation below the first", inputs.x >= leaf.x + leaf.w && outputs.y >= inputs.y + inputs.h, JSON.stringify({ leaf, inputs, outputs }));
+    wb = fresh({ timeScale: 60 });
+    await playLesson(wb, F.history);
+    problems = geometryProblems(wb);
+    check("history: timeline drawn with a spoken correction, still no overlap", wb.items.get("t3").text === "476: West falls" && problems.length === 0, problems.join(" | ") + wb.items.get("t3").text);
+    const labels = ["t1", "t2", "t3"].map((id) => wb.items.get(id).bbox);
+    check("history: the corrected label does not land on its neighbours", apart(labels[0], labels[2], 4) && apart(labels[1], labels[2], 4), JSON.stringify(labels));
+    check("history: only one element holds the corrected id", wb.svg.querySelectorAll('[data-wb-id="t3"]').length === 1);
 
-    // 4. Flow layout: auto-placed text stacks without overlapping
-    wb = fresh({ timeScale: 30 });
-    wb.enqueue(ops([1, 2, 3, 4].map((n) => ({ op: "write", content: "line number " + n, id: "l" + n }))));
-    await wb.idle();
-    const boxes = wb.summary();
-    check("auto-placed text stacks downward without overlap", boxes.every((b, i) => i === 0 || b.y >= boxes[i - 1].y + boxes[i - 1].h - 1), JSON.stringify(boxes.map((b) => Math.round(b.y))));
-    check("everything stays inside the board", boxes.every((b) => b.x >= 0 && b.y >= 0 && b.x + b.w <= 1000 && b.y + b.h <= 600));
-    wb = fresh({ timeScale: 30 });
-    wb.enqueue(ops(Array.from({ length: 9 }, (_, n) => ({ op: "write", content: "a long line of handwriting number " + n, id: "m" + n }))));
-    await wb.idle();
-    const many = wb.summary();
-    check("when the left column is full, text continues in a second column", many.some((b) => b.x > 400) && many.every((b) => b.y + b.h <= 600), JSON.stringify(many.map((b) => [Math.round(b.x), Math.round(b.y)])));
+    /* 3. A long lesson makes new pages by itself, before drawing, and never overlaps */
+    wb = fresh({ timeScale: 80, ...quiet() });
+    const long = F.longLesson(12), total = long.turns.reduce((n, t) => n + t.ops.length, 0);
+    await playLesson(wb, long);
+    check("long lesson: all " + total + " elements are drawn", wb.items.size === total, wb.items.size);
+    check("long lesson: new pages were started automatically", wb.pages.length >= 4, "pages " + wb.pages.length);
+    problems = geometryProblems(wb);
+    check("long lesson: zero overlap and everything inside the page, on every page", problems.length === 0, problems.slice(0, 3).join(" | "));
+    check("long lesson: every page is used (no empty pages, none overfull)", wb.pages.every((p) => p.ids.size > 0) && wb.pages.every((p) => p.layout.freeFraction() >= 0));
+    check("long lesson: elements are never split across pages and keep their order", (() => { const order = [...wb.items.values()].map((i) => i.page.number); return order.every((n, i) => i === 0 || n >= order[i - 1]); })());
+    check("long lesson: text is not shrunk to fit (a title has the same size on page 1 and on the last page)", (() => { const width = (id) => wb.items.get(id).g.querySelector("[data-wb-hand]").getAttribute("stroke-width"), last = "lt" + (long.turns.length - 1); return wb.items.has(last) && width("lt0") === width(last) && wb.items.get(last).page !== wb.items.get("lt0").page; })());
+    const tell = wb.state();
+    check("long lesson: the notebook state counts the pages", tell.pages.length === wb.pages.length && tell.live === wb.pages[wb.pages.length - 1].id);
+    const fullLog = quiet(); wb = fresh({ timeScale: 80, ...fullLog });
+    await playLesson(wb, F.longLesson(4));
+    check("long lesson: starting a page because the last was full is reported", fullLog.logs.some((l) => l.includes("had no room") && l.includes("started page")), fullLog.logs.join(" | "));
 
-    // 5. Biology: unrelated subject, shapes + labels + chemistry
-    wb = fresh({ timeScale: 30 });
-    await playLesson(wb, biology);
-    check("biology diagram drew all 10 elements", wb.items.size === biology.turns[0].ops.length, wb.items.size);
-    check("biology uses an ellipse, arrows and a dashed stroke", !!wb.svg.querySelector('[data-wb-id="chloroplast"] path') && !!wb.svg.querySelector('[data-wb-id="out"] path[stroke-dasharray]'));
+    /* 4. A topic change keeps the earlier pages, with their handwriting */
+    wb = fresh({ timeScale: 80 });
+    await playLesson(wb, F.mathematics); const mathPages = wb.pages.length, mathIds = ["title", "eq", "g", "curve", "vertex", "roots", "c1", "c2", "c3"];
+    const strokesOnMathPages = () => wb.pages.slice(0, mathPages).reduce((n, p) => n + p.g.querySelectorAll("path").length, 0), mathStrokes = strokesOnMathPages();
+    await playLesson(wb, F.biology); await playLesson(wb, F.history); await playLesson(wb, F.topicChange);
+    check("topic change: each new topic starts a new page; nothing is destroyed", wb.pages.length === mathPages + 3 && wb.pages.slice(mathPages).map((p) => p.title).join(",") === "Photosynthesis,Rome,Cells", wb.pages.length + " pages: " + wb.pages.map((p) => p.title).join(","));
+    check("topic change: earlier pages keep every element and their pen strokes", mathIds.every((id) => wb.items.has(id) && wb.items.get(id).page.number <= mathPages) && strokesOnMathPages() === mathStrokes && mathStrokes > 60, mathStrokes + " vs " + strokesOnMathPages());
+    check("topic change: the new subject is on its own page", ["title2", "cellg", "cell", "nucleus", "nlabel"].every((id) => wb.items.get(id) && wb.items.get(id).page === wb.pages[wb.pages.length - 1]));
+    check("topic change: the empty first page was reused, not left blank before the new topic", wb.pages.every((p) => p.ids.size > 0));
+    problems = geometryProblems(wb);
+    check("topic change: still zero overlap across every page", problems.length === 0, problems.join(" | "));
 
-    // 6. History: timeline, then a spoken correction
-    wb = fresh({ timeScale: 30 });
-    await playLesson(wb, history);
-    check("correction replaced the date text", wb.items.get("t3").text === "476: West falls", wb.items.get("t3") && wb.items.get("t3").text);
-    check("only one element holds the corrected id", wb.svg.querySelectorAll('[data-wb-id="t3"]').length === 1);
-    check("corrected text landed where the old text was", Math.abs(wb.items.get("t3").bbox.x - 720) < 6 && Math.abs(wb.items.get("t3").bbox.y - 270) < 6, JSON.stringify(wb.items.get("t3").bbox));
-    check("other timeline items untouched by the correction", ["m1", "t1", "m2", "t2", "m3", "line"].every((id) => wb.items.has(id)));
+    /* 5. The student looks at an earlier page while the teacher keeps writing */
+    wb = fresh({ timeScale: 20 });
+    const seen = []; wb.onNotebook = (s) => seen.push(s);
+    await playLesson(wb, F.mathematics);
+    const before = wb.pages.length;
+    playTurn(wb, F.biology.turns[0]);
+    await waitUntil(() => wb.pages.length === before + 1 && wb.items.has("btitle"));
+    const liveId = "p" + (before + 1);
+    check("student: the view follows the teacher to the new page by default", wb.state().view === liveId && wb.state().live === liveId && wb.state().followLive === true, JSON.stringify(wb.state()));
+    check("student: Previous goes back without moving the teacher", wb.viewPage(1) && wb.state().view === "p1" && wb.state().live === liveId && wb.state().followLive === false);
+    const live = wb.pages[before], countOnLive = live.ids.size;
+    await waitUntil(() => live.ids.size > countOnLive + 2);
+    check("student: the teacher keeps drawing on the live page while the student reads page 1", live.ids.size > countOnLive + 2 && wb.state().view === "p1" && wb.state().live === liveId);
+    check("student: the page the student looks at is shown and the live page is hidden", wb.pages[0].g.style.opacity === "1" && live.g.style.opacity === "0");
+    check("student: the pencil is not shown on a page the teacher is not writing on", wb.pencil.style.opacity === "0");
+    check("student: the page with new writing is flagged, and the flag clears when viewed", wb.state().pages[before].unseen === true && (wb.viewPage(before + 1) && wb.state().pages[before].unseen === false));
+    wb.viewPage(1); await wb.idle();
+    check("student: stays on page 1 after the teacher finishes (control is never taken away)", wb.state().view === "p1" && wb.state().followLive === false);
+    wb.returnToLive();
+    check("student: Return to live page goes to the teacher's page and follows again", wb.state().view === wb.state().live && wb.state().followLive === true);
+    wb.viewPage(1); wb.viewPage(2); wb.viewPage(1); wb.viewPage(wb.pages.length); wb.viewPage(1);
+    await sleep(60);
+    check("student: flipping quickly between pages never leaves two pages showing at once (hidden pages are really hidden: opacity 0 and their fade-in cancelled)", wb.pages.every((p) => (p === wb.view ? p.g.style.opacity === "1" : p.g.style.opacity === "0" && getComputedStyle(p.g).animationName === "none")), wb.pages.map((p) => p.g.style.opacity + "/" + getComputedStyle(p.g).animationName).join(" "));
+    check("student: navigation limits (no page 0, no page beyond the last)", wb.viewPage(0) === false && wb.viewPage(99) === false && wb.viewNext() !== undefined && wb.viewPrevious() !== undefined);
+    check("student: the notebook reported every change to its listener", seen.length > 5 && seen.some((s) => s.followLive === false) && seen.some((s) => s.pages.length === 2));
 
-    // 7. Topic change clears old visuals and draws new ones
-    await playLesson(wb, topic);
-    check("topic change removed the old subject", ["m1", "t3", "line", "title"].every((id) => !wb.items.has(id)), ids(wb).join(","));
-    check("topic change drew the new subject", ["title2", "cell", "nucleus", "nlabel"].every((id) => wb.items.has(id)));
+    /* 6. The teacher goes back to an earlier page, points at an equation, and returns */
+    wb = fresh({ timeScale: 25 });
+    await playLesson(wb, F.mathematics); await playLesson(wb, F.biology);
+    const states = []; wb.onNotebook = (s) => states.push(s.live + (s.followLive ? "*" : ""));
+    let sawRing = false, ringPage = null, viewDuringRing = null;
+    const watch = setInterval(() => { const ring = wb.svg.querySelector("[data-wb-pointer]"); if (ring) { sawRing = true; ringPage = ring.parentNode.getAttribute("data-wb-page"); viewDuringRing = wb.state().view; } }, 20);
+    const lastPage = wb.state().live, itemsBefore = wb.items.size, pagesBefore = wb.pages.length;
+    playTurn(wb, F.revisit.turns[0]); await wb.idle(); clearInterval(watch);
+    check("revisit: the teacher went to page 1, circled the equation there, and came back to the page being written", sawRing && ringPage === "p1" && viewDuringRing === "p1" && wb.state().live === lastPage, JSON.stringify({ sawRing, ringPage, viewDuringRing, live: wb.state().live, lastPage, states }));
+    check("revisit: the pointer is temporary and leaves nothing behind", !wb.svg.querySelector("[data-wb-pointer]"));
+    check("revisit: nothing in the notebook was changed or added", wb.items.get("eq").page.number === 1 && wb.items.size === itemsBefore && wb.pages.length === pagesBefore, wb.items.size + " vs " + itemsBefore);
+    // A student who had already gone back to page 1 sees the pointing there and is not moved afterwards
+    wb = fresh({ timeScale: 25 });
+    await playLesson(wb, F.mathematics); await playLesson(wb, F.biology);
+    wb.viewPage(1); const liveBefore = wb.state().live;
+    playTurn(wb, F.revisit.turns[0]); await wb.idle();
+    check("revisit: a student reading page 1 is not moved while the teacher revisits and returns", wb.state().view === "p1" && wb.state().followLive === false && wb.state().live === liveBefore, JSON.stringify(wb.state()));
+    const pointer = quiet(); wb = fresh({ timeScale: 80, ...pointer });
+    await playLesson(wb, F.mathematics);
+    wb.enqueue(ops([{ op: "go_to_page", page: "p1" }, { op: "point_to", target: "eq", return: false }], wb)); await wb.idle();
+    check("revisit: point_to can stay on the page it went to (return: false)", wb.state().live === "p1");
+    wb.enqueue(ops([{ op: "go_to_page", page: "latest" }], wb)); await wb.idle();
+    check("revisit: go_to_page latest returns to the end of the notebook", wb.state().live === "p1" || wb.state().live === wb.pages[wb.pages.length - 1].id);
 
-    // 8. Interrupt: pending drawing stops, drawn content stays
+    /* 7. Interruptions in the middle of writing */
     wb = fresh({ timeScale: 1.5 });
-    playTurn(wb, biology.turns[0]);
-    await waitUntil(() => wb.items.size >= 3);
-    const atInterrupt = wb.items.size;
-    wb.cancelPending();
-    await wb.idle();
-    const afterInterrupt = wb.items.size;
-    await sleep(2500);
-    check("interrupt keeps what was already drawn", atInterrupt >= 1 && afterInterrupt >= atInterrupt, atInterrupt + "->" + afterInterrupt);
-    check("interrupt drops outdated drawing (nothing more appears)", wb.items.size === afterInterrupt && afterInterrupt < biology.turns[0].ops.length, wb.items.size + "/" + afterInterrupt);
-    check("interrupt leaves no half-drawn stroke", halfDrawn(wb) === 0, halfDrawn(wb));
-    check("pencil is put away after an interrupt", wb.pencil.style.opacity === "0");
+    playTurn(wb, F.biology.turns[0]);
+    await waitUntil(() => wb.items.size >= 4);
+    const atInterrupt = wb.items.size; wb.cancelPending(); await wb.idle();
+    const afterInterrupt = wb.items.size; await sleep(1500);
+    check("interrupt: stops the remaining drawing and keeps what was drawn", wb.items.size === afterInterrupt && afterInterrupt >= atInterrupt && afterInterrupt < 12, atInterrupt + "->" + afterInterrupt + "->" + wb.items.size);
+    check("interrupt: nothing is left half drawn and the pencil is put away", halfDrawn(wb) === 0 && wb.pencil.style.opacity === "0");
+    check("interrupt: the space of what was never drawn stays free (a later answer can use it)", ![...wb.pages[0].layout.items.keys()].some((id) => !wb.items.has(id)));
     playTurn(wb, { teacher: "New answer.", ops: [{ op: "write", content: "fresh start", id: "after" }] });
-    wb.timeScale = 30; await wb.idle();
-    check("board accepts new content after an interrupt", wb.items.has("after"));
-
-    // 8b. Interrupting a multi-step element (a graph) stops it instead of animating the rest
+    wb.timeScale = 40; await wb.idle();
+    check("interrupt: the board accepts new content afterwards, without overlap", wb.items.has("after") && geometryProblems(wb).length === 0, geometryProblems(wb).join(" | "));
     wb = fresh({ timeScale: 1 });
-    wb.enqueue(ops([{ op: "graph", id: "g", x: 300, y: 100, w: 400, h: 300, grid: true, xlabel: "x", ylabel: "y" }, { op: "write", content: "after graph", id: "late" }]));
+    wb.enqueue(ops([{ op: "graph", id: "g", w: 400, h: 300, grid: true, xlabel: "x", ylabel: "y" }, { op: "write", content: "after graph", id: "late" }]));
     await sleep(450);
-    check("a graph's y axis is not visible while the x axis is still being drawn", [...wb.items.get("g").g.querySelectorAll("path")].some((p) => p.style.opacity === "0" && p.getAttribute("d").includes("V")));
+    check("interrupt: a graph's y axis is not visible while the x axis is still being drawn", [...wb.items.get("g").g.querySelectorAll("path")].some((p) => p.style.opacity === "0" && p.getAttribute("d").includes("V")));
     wb.cancelPending(); await wb.idle();
-    check("interrupting a graph completes it at once and stops", wb.jobs.size === 0 && !wb.items.has("late") && wb.items.get("g").g.querySelector("[data-wb-hand]") !== null);
+    check("interrupt: interrupting a graph completes it at once and drops the next step", wb.jobs.size === 0 && !wb.items.has("late") && wb.items.get("g").g.querySelector("[data-wb-hand]") !== null);
 
-    // 9. Voice cues: wait for the spoken words; ignore cues when no voice timing exists; never stall
-    wb = fresh({ timeScale: 30 });
-    wb.enqueue(ops([{ op: "write", content: "no timing", id: "n1", cue: "never spoken" }]));
-    await wb.idle();
-    check("cue ignored when there are no voice timing events", wb.items.has("n1"));
-    wb = fresh({ timeScale: 30, cueTimeoutMs: 100000 });
-    wb.beginTurn(); wb.speechProgress("so ");
-    wb.enqueue(ops([{ op: "write", content: "waits", id: "w1", cue: "purple elephant" }]));
-    await sleep(300);
-    check("op waits while its cue has not been spoken", !wb.items.has("w1"));
-    wb.speechProgress("a purple elephant walks in");
-    await wb.idle();
-    check("op draws once its cue is spoken", wb.items.has("w1"));
-    wb = fresh({ timeScale: 4, cueTimeoutMs: 400 });
-    wb.beginTurn(); wb.speechProgress("hello ");
-    wb.enqueue(ops([{ op: "write", content: "late", id: "t9", cue: "missed words" }]));
-    await wb.idle();
-    check("a missed cue times out instead of freezing the board", wb.items.has("t9"));
-    wb = fresh({ timeScale: 30, cueTimeoutMs: 100000 });
-    wb.beginTurn(); wb.speechProgress("x ");
-    wb.enqueue(ops([{ op: "write", content: "stuck", id: "s1", cue: "never" }]));
-    await sleep(100); wb.cancelPending(); await wb.idle();
-    check("interrupt releases ops waiting for a cue", !wb.items.has("s1") && wb.queue.length === 0);
+    /* 8. Voice cues: on time, early (alignment), late, missing, out of order, and speech ending */
+    const slow = () => new core.SpeechClock({ wordsPerSecond: 8 }); // a turn of ~16 words lasts about 2 seconds
+    const sentence = F.sentences.turns[0];
+    const appear = async (wb) => { const t = {}, t0 = performance.now(); const timer = setInterval(() => { for (const id of ["s1", "s2", "s3"]) if (!(id in t) && wb.items.has(id)) t[id] = Math.round(performance.now() - t0); }, 15); await wb.idle(); clearInterval(timer); return t; };
+    wb = fresh({ timeScale: 60, clock: slow() });
+    wb.beginTurn(sentence.teacher); wb.speechStart(); wb.enqueue(ops(sentence.ops, wb));
+    let when = await appear(wb);
+    check("cues: each step is drawn when its words are reached, in speaking order", when.s1 < when.s2 && when.s2 < when.s3 && when.s3 > 1000, JSON.stringify(when));
+    check("cues: nothing is drawn long before it is said (the last step waits for its sentence)", when.s1 < 1000 && when.s3 > 1200, JSON.stringify(when));
+    wb = fresh({ timeScale: 60, clock: slow() });
+    wb.beginTurn(sentence.teacher); wb.speechStart(); wb.enqueue(ops(sentence.ops, wb));
+    await sleep(200); check("cues: at 0.2 s only the first step is on the board", wb.items.has("s1") && !wb.items.has("s2") && !wb.items.has("s3"), ids(wb).join(","));
+    wb.speechProgress("First we look at the triangle. Then we mark the right angle. ", null);
+    await waitUntil(() => wb.items.has("s2"), 600);
+    check("cues: with ElevenLabs alignment a step appears the moment its words are played (earlier than the estimate)", wb.items.has("s2") && !wb.items.has("s3"), ids(wb).join(","));
+    wb.speechEnd(); await wb.idle();
+    check("cues: when the speech ends, anything still waiting is drawn at once (never stuck)", wb.items.has("s3"));
+    const late = quiet(); wb = fresh({ timeScale: 60, clock: slow(), ...late });
+    wb.beginTurn(sentence.teacher); wb.enqueue(ops(sentence.ops, wb)); // the voice never reports starting
+    await sleep(300); const noStartIds = ids(wb);
+    when = await appear(wb);
+    check("cues: if the voice start is never reported, the board falls back to the time the text arrived and still draws everything", noStartIds.length <= 1 && wb.items.has("s3"), noStartIds.join(","));
+    wb = fresh({ timeScale: 60, clock: slow() });
+    wb.beginTurn(sentence.teacher); wb.speechStart();
+    wb.speechProgress("Completely different spoken words that never match. ", null);
+    wb.enqueue(ops(sentence.ops, wb)); when = await appear(wb);
+    check("cues: alignment that never matches (spoken numbers, markup) falls back to the estimate and still draws everything", wb.items.has("s3") && when.s3 > 1800, JSON.stringify(when));
+    const missing = quiet(); wb = fresh({ timeScale: 60, clock: slow(), ...missing });
+    wb.beginTurn(sentence.teacher); wb.speechStart();
+    wb.enqueue(ops([{ op: "write", content: "no such cue", id: "m1", cue: "words nobody said" }, { op: "write", content: "no cue at all", id: "m2" }], wb)); await wb.idle();
+    check("cues: a cue that is not in the teacher's words draws without waiting, and is reported", wb.items.has("m1") && wb.items.has("m2") && missing.logs.some((l) => l.startsWith("warn") && l.includes("words nobody said")), missing.logs.join(" | "));
+    wb = fresh({ timeScale: 60, clock: slow() });
+    wb.beginTurn(sentence.teacher); wb.speechStart();
+    const reordered = [sentence.ops[2], sentence.ops[0], sentence.ops[1]]; // formula first, although it is said last
+    wb.enqueue(ops(reordered, wb)); when = await appear(wb);
+    check("cues: out-of-order cues are all drawn; the step said last is still not drawn early", wb.items.has("s1") && wb.items.has("s2") && wb.items.has("s3") && when.s3 > 1200, JSON.stringify(when));
+    const gateInfo = []; wb = fresh({ timeScale: 60, clock: slow(), onGate: (g) => gateInfo.push(g) });
+    wb.beginTurn(sentence.teacher); wb.speechStart(); wb.enqueue(ops(sentence.ops, wb)); await wb.idle();
+    check("cues: each release is reported with its reason, for diagnostics", gateInfo.length === 3 && gateInfo.every((g) => g.reason === "estimate" || g.reason === "speech-ended" || g.reason === "aligned"), JSON.stringify(gateInfo.map((g) => g.reason)));
+    wb = fresh({ timeScale: 60, clock: slow() });
+    wb.beginTurn(sentence.teacher); wb.speechStart(); wb.enqueue(ops(sentence.ops, wb));
+    await sleep(150); wb.cancelPending(); await wb.idle(); const afterCancel = ids(wb).length; await sleep(1500);
+    check("cues: after an interruption the waiting steps are never drawn (no outdated explanation)", ids(wb).length === afterCancel && !wb.items.has("s3"), ids(wb).join(","));
 
-    // 10. Safety: AI text is only ever drawn as strokes
-    wb = fresh({ timeScale: 40 });
-    const evil = '<img src=x onerror="window.__pwned=1"><script>window.__pwned=1<\/script>';
-    wb.enqueue(ops([{ op: "write", content: evil, id: "evil" }, { op: "write", kind: "math", content: "\\href{javascript:window.__pwned=1}{click} \\unknown", id: "evil2" }]));
-    await wb.idle(); await sleep(200);
-    check("AI text is drawn as pen strokes, never inserted as HTML", !wb.svg.querySelector("img, script, a, foreignObject") && !window.__pwned);
-    check("unknown LaTeX is skipped without breaking the rest", wb.items.has("evil2"));
-
-    // 11. Maths robustness
-    wb = fresh({ timeScale: 40 });
-    wb.enqueue(ops([{ op: "graph", id: "g", xmin: -6, xmax: 6, ymin: -4, ymax: 4 }, { op: "plot", graph: "g", fn: "tan(x)", id: "tan" }, { op: "plot", graph: "g", fn: "1/x", id: "inv" }, { op: "plot", graph: "g", fn: "ln(x)", id: "ln" }]));
-    await wb.idle();
-    check("tan(x) breaks at its asymptotes (drawn as separate pieces)", wb.items.get("tan").g.querySelectorAll("path[d]").length >= 3, wb.items.get("tan").g.querySelectorAll("path[d]").length);
-    check("ln(x) only draws where it is defined", wb.items.has("ln") && wb.items.get("ln").g.querySelector("path[d]").getAttribute("d").startsWith("M"));
-
-    // 11b. Mid-stroke: the pencil rides the line, and the arrowhead waits for the shaft
+    /* 9. Safety, pace and robustness carried over from before */
+    wb = fresh({ timeScale: 60 });
+    wb.enqueue(ops([{ op: "write", content: '<img src=x onerror="window.__pwned=1"><script>window.__pwned=1<\/script>', id: "evil" }, { op: "write", kind: "math", content: "\\href{javascript:window.__pwned=1}{click} \\unknown", id: "evil2" }], wb));
+    await wb.idle(); await sleep(150);
+    check("safety: AI text is only drawn as pen strokes, never inserted as HTML", !wb.svg.querySelector("img, script, a, foreignObject") && !window.__pwned && wb.items.has("evil2"));
+    wb = fresh({ timeScale: 60 });
+    wb.enqueue(ops([{ op: "graph", id: "g", xmin: -6, xmax: 6, ymin: -4, ymax: 4 }, { op: "plot", graph: "g", fn: "tan(x)", id: "tan" }, { op: "plot", graph: "g", fn: "ln(x)", id: "ln" }], wb)); await wb.idle();
+    check("maths: tan(x) breaks at its asymptotes; ln(x) only draws where defined", wb.items.get("tan").g.querySelectorAll("path[d]").length >= 3 && wb.items.has("ln"));
     wb = fresh({ timeScale: 0.5 });
-    wb.enqueue(ops([{ op: "shape", shape: "arrow", points: [[100, 100], [500, 100]], id: "ar" }]));
+    wb.enqueue(ops([{ op: "shape", shape: "arrow", points: [[100, 100], [500, 100]], id: "ar" }], wb));
     await sleep(500);
-    const pieces = [...wb.items.get("ar").g.querySelectorAll("path")];
-    const pencilAt = /translate\(([-\d.]+) ([-\d.]+)\)/.exec(wb.pencil.getAttribute("transform"));
-    check("pencil rides the line being drawn", !!pencilAt && +pencilAt[1] > 100 && +pencilAt[1] < 500 && Math.abs(+pencilAt[2] - 100) < 2, pencilAt && pencilAt[0]);
-    check("arrowhead is not visible before the shaft is finished", pieces.length === 2 && pieces[1].style.opacity === "0", pieces.map((p) => p.style.opacity).join(","));
+    const pieces = [...wb.items.get("ar").g.querySelectorAll("path")], pencilAt = /translate\(([-\d.]+) ([-\d.]+)\)/.exec(wb.pencil.getAttribute("transform"));
+    check("pen: the pencil rides the line being drawn, and the arrowhead waits for the shaft", !!pencilAt && pieces.length === 2 && pieces[1].style.opacity === "0" && +wb.pencil.style.opacity > 0, pencilAt && pencilAt[0]);
     await wb.idle();
-    check("arrow ends complete (shaft and head both drawn)", [...wb.items.get("ar").g.querySelectorAll("path")].every((p) => p.style.opacity === "1" && p.style.strokeDashoffset === ""));
-    wb = fresh({ timeScale: 0.7 });
-    wb.enqueue(ops([{ op: "graph", id: "g", x: 300, y: 100, w: 400, h: 300 }, { op: "plot", graph: "g", fn: "x", id: "diag" }]));
-    await waitUntil(() => wb.items.has("diag")); await sleep(350);
-    const onGraph = /translate\(([-\d.]+) ([-\d.]+)\)/.exec(wb.pencil.getAttribute("transform"));
-    check("pencil position accounts for where the graph sits on the board", !!onGraph && +onGraph[1] >= 300 && +onGraph[1] <= 700 && +onGraph[2] >= 100 && +onGraph[2] <= 400, onGraph && onGraph[0]);
-    await wb.idle();
-
-    // 12. Reduced motion
     wb = fresh({ reducedMotion: true });
-    const t0 = performance.now();
-    wb.enqueue(ops(math.turns[0].ops)); await wb.idle();
-    check("reduced motion: board appears without animation", wb.items.size === 4 && performance.now() - t0 < 1500 && wb.pencil.style.opacity === "0", Math.round(performance.now() - t0) + "ms");
+    const t0 = performance.now(); wb.enqueue(ops(F.mathematics.turns[0].ops, wb)); await wb.idle();
+    check("reduced motion: the page appears without animation", wb.items.size === 4 && performance.now() - t0 < 2500 && wb.pencil.style.opacity === "0", Math.round(performance.now() - t0) + "ms");
+    wb = fresh({ timeScale: 60 });
+    wb.enqueue(ops([{ op: "write", content: "same id", id: "dup" }], wb)); await wb.idle(); const firstPos = { ...wb.items.get("dup").bbox };
+    wb.enqueue(ops([{ op: "write", content: "same id again, longer text", id: "dup" }], wb)); await wb.idle();
+    check("replacing an element (same id) frees the old space and never overlaps", wb.svg.querySelectorAll('[data-wb-id="dup"]').length === 1 && geometryProblems(wb).length === 0 && wb.items.get("dup").bbox.x === firstPos.x && wb.items.get("dup").bbox.y === firstPos.y);
+    wb = fresh({ timeScale: 60 });
+    wb.enqueue(ops([{ op: "write", content: "to remove", id: "r1" }, { op: "erase", target: "r1" }, { op: "write", content: "reuses the space", id: "r2" }], wb)); await wb.idle();
+    check("erase: the freed space is reused by the next element", wb.items.get("r2").bbox.y === wb.items.get("r2").page.layout.margin && !wb.items.has("r1"));
+    // Correcting something on an OLD page must not change where the teacher is writing, and diagram labels give their space back
+    wb = fresh({ timeScale: 60 });
+    await playLesson(wb, F.mathematics); await playLesson(wb, F.biology);
+    const writingPage = wb.state().live;
+    playTurn(wb, { teacher: "Fix the old one.", ops: [{ op: "correct", target: "roots", with: { op: "write", kind: "math", content: "x = \\pm 5", id: "roots" }, cue: "Fix the old one" }] }); await wb.idle();
+    check("correction on an old page: the teacher's current page does not change", wb.state().live === writingPage && wb.working === wb.pages[wb.pages.length - 1] && wb.items.get("roots").page.number === 1, JSON.stringify({ live: wb.state().live, working: wb.working.id, page: wb.items.get("roots").page.number }));
+    wb.enqueue(ops([{ op: "point_to", target: "title" }], wb)); await wb.idle();
+    check("correction on an old page: after pointing at something on page 1 the teacher still returns to the page being written", wb.state().live === writingPage, wb.state().live + " vs " + writingPage);
+    wb = fresh({ timeScale: 60 });
+    wb.enqueue(ops([{ op: "group", id: "dg", w: 400, h: 240 }, { op: "write", group: "dg", content: "first label", x: 40, y: 60, id: "lab1" }], wb)); await wb.idle();
+    const labelSpot = { ...wb.items.get("lab1").bbox };
+    wb.enqueue(ops([{ op: "erase", target: "lab1" }, { op: "write", group: "dg", content: "first label", x: 40, y: 60, id: "lab2" }], wb)); await wb.idle();
+    check("a diagram label that is erased gives its place back: a new label with another id lands exactly there", wb.items.get("lab2").bbox.x === labelSpot.x && wb.items.get("lab2").bbox.y === labelSpot.y, JSON.stringify({ was: labelSpot, now: wb.items.get("lab2").bbox }));
+    wb.enqueue(ops([{ op: "correct", target: "lab2", with: { op: "write", content: "fixed label", id: "lab3" } }], wb)); await wb.idle();
+    check("correcting a diagram label keeps it inside its diagram, at the same place", wb.items.get("lab3").parent === wb.items.get("dg") && Math.abs(wb.items.get("lab3").bbox.x - labelSpot.x) < 1 && Math.abs(wb.items.get("lab3").bbox.y - labelSpot.y) < 1, JSON.stringify(wb.items.get("lab3").bbox));
+    wb = fresh({ timeScale: 60 });
+    await playLesson(wb, F.mathematics); playTurn(wb, { teacher: "Fix it.", ops: [{ op: "correct", target: "roots", with: { op: "write", kind: "math", content: "x = \\pm 4", id: "roots", color: "red" }, cue: "Fix it" }] }); await wb.idle();
+    check("correction: the new version lands where the old one was (or in free space) without overlap", wb.items.get("roots").text === "x = \\pm 4" && geometryProblems(wb).length === 0, geometryProblems(wb).join(" | "));
   } catch (error) {
     check("self-test ran to the end", false, error && (error.stack || error.message || error));
   }

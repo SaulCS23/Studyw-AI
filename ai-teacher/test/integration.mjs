@@ -26,7 +26,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const [math, biology, history, topic] = fixtures.all;
 const elephantTurn = { teacher: "Now look at the purple elephant over there.", ops: [{ op: "write", kind: "text", size: "body", content: "elephant", id: "el", cue: "purple elephant" }] };
 const toolRequestOps = [{ op: "write", kind: "text", size: "title", content: "Triangles", id: "tri-title" }, { op: "shape", shape: "polygon", points: [[300, 420], [500, 220], [700, 420]], color: "blue", id: "tri" }, { op: "write", kind: "text", size: "small", content: "three sides", x: 420, y: 450, id: "tri-label" }];
-const turnsByText = [...fixtures.all.flatMap((l) => l.turns), elephantTurn];
+const turnsByText = [...fixtures.all.flatMap((l) => l.turns), ...fixtures.revisit.turns, ...fixtures.sentences.turns, ...fixtures.longLesson(10).turns, elephantTurn];
 const service = { delayMs: 0, plannerStatus: 200, planner: [], classic: [] }; // what the page asked for is logged here
 
 const elevenLabsStub = `export const Conversation = { async startSession(opts){ window.__opts = opts;
@@ -53,7 +53,10 @@ async function answerAnthropic(requestBody) {
   const spoken = [...prompt.matchAll(/^Teacher: (.*)$/gm)].pop()?.[1] || "";
   // If consecutive teacher messages were merged into one transcript line, answer for the one spoken last.
   const turn = turnsByText.map((t) => ({ t, at: spoken.lastIndexOf(t.teacher.slice(0, 30)) })).filter((m) => m.at >= 0).sort((a, b) => b.at - a.at)[0]?.t;
-  return { status: 200, type: "text/event-stream", text: sse((turn ? turn.ops : []).map((o) => JSON.stringify(o)).join("\n") + "\n") };
+  let steps = turn ? turn.ops : [];
+  // A turn planned in two parts: the first request sees only the first sentence, the continuation only what is left.
+  if (turn === fixtures.sentences.turns[0]) { if (prompt.includes("Only plan what comes after")) steps = steps.slice(1); else if (!spoken.includes("Then we mark")) steps = steps.slice(0, 1); }
+  return { status: 200, type: "text/event-stream", text: sse(steps.map((o) => JSON.stringify(o)).join("\n") + "\n") };
 }
 
 /* ---------- Chrome DevTools Protocol, minimal ---------- */
@@ -112,15 +115,15 @@ async function waitFor(check, label, ms = 25000) {
   const start = Date.now();
   for (;;) { const value = await check(); if (value) return value; if (Date.now() - start > ms) throw new Error("timed out waiting for: " + label); await sleep(100); }
 }
-async function load(boardStyle) {
+async function load(boardStyle, plannerModel) {
   await send("Page.navigate", { url: pageUrl });
   await waitFor(() => page("document.readyState === 'complete'"), "page load");
-  await page(`localStorage.setItem('ttl-agent','agent_test'); localStorage.setItem('ttl-akey','sk-test'); localStorage.setItem('ttl-board','${boardStyle}'); true`);
+  await page(`localStorage.setItem('ttl-agent','agent_test'); localStorage.setItem('ttl-akey','sk-test'); localStorage.setItem('ttl-board','${boardStyle}'); localStorage.setItem('ttl-wbmodel','${plannerModel || 'claude-sonnet-5-5'}'); true`);
   await send("Page.reload");
   await sleep(300);
   await waitFor(() => page("document.readyState === 'complete' && !!window.Whiteboard && !!window.WhiteboardCore && !!window.WhiteboardHand && !!document.getElementById('call')"), "scripts loaded");
   // Run the pen at 2x so the whole test is shorter. The page itself is untouched.
-  await page("(() => { const Original = window.Whiteboard; window.Whiteboard = class extends Original { constructor(host, options) { super(host, { ...options, timeScale: 2 }); } }; return true; })()");
+  await page("(() => { const Original = window.Whiteboard; window.Whiteboard = class extends Original { constructor(host, options) { super(host, { ...options, timeScale: 2 }); window.__wb = this; } }; return true; })()");
   await page("document.getElementById('call').click(); true");
   await waitFor(() => page("!!window.__opts"), "stub conversation started");
 }
@@ -130,18 +133,32 @@ const visible = (id) => page(`!document.getElementById('${id}').hidden`);
 const badge = () => page("document.getElementById('boardBadge').textContent");
 const status = () => page("document.getElementById('status').textContent");
 const events = (kind) => page(`window.__whiteboardLog.filter((e) => e.kind === ${JSON.stringify(kind)}).map((e) => e.message)`);
-const speak = (text) => page(`__opts.onModeChange({ mode: 'speaking' }); __opts.onMessage({ source: 'ai', message: ${JSON.stringify(text)} }); true`);
+// The way the SDK reports a teacher turn: the voice stops listening and starts speaking, and the text arrives.
+const speak = (text) => page(`__opts.onModeChange({ mode: 'listening' }); __opts.onModeChange({ mode: 'speaking' }); __opts.onMessage({ source: 'ai', message: ${JSON.stringify(text)} }); true`);
 const hear = (text) => page(`__opts.onMessage({ source: 'user', message: ${JSON.stringify(text)} }); true`);
 /** Strokes of handwriting on the animated board: finished, being drawn, or waiting; and the pencil's opacity. */
 const strokeState = () => page(`(() => { const ps = [...document.querySelectorAll('#wbBoard [data-wb-hand] path')]; let done = 0, partial = 0, waiting = 0;
   for (const p of ps) { if (p.style.visibility === 'hidden') waiting++; else if (p.style.strokeDashoffset === '' || parseFloat(p.style.strokeDashoffset) === 0) done++; else partial++; }
   const pen = document.querySelector('#wbBoard [data-wb-pencil]'); return { total: ps.length, done, partial, waiting, pencil: pen ? +pen.style.opacity : 0 }; })()`);
+const info = () => page("document.getElementById('pageInfo').textContent");
+const pageButtons = () => page("[...document.querySelectorAll('#pageList .pg')].map((b) => ({ n: b.textContent, current: b.getAttribute('aria-current') === 'page', live: b.classList.contains('live'), unseen: b.classList.contains('unseen') }))");
+const click = (id) => page(`document.getElementById('${id}').click(); true`);
+const clickPage = (n) => page(`[...document.querySelectorAll('#pageList .pg')].find((b) => b.textContent === '${n}').click(); true`);
+const returnVisible = () => page("!document.getElementById('pageLive').hidden");
+const wbState = () => page("window.__wb.state()");
+const pageOpacity = (n) => page(`document.querySelector('#wbBoard [data-wb-page="p${n}"]').style.opacity`);
+/** Overlap and bounds, checked on the real page from the layout rectangles of every top-level element. */
+const overlaps = () => page(`(() => { const out = []; for (const page of window.__wb.pages) { const top = [...page.ids].map((id) => window.__wb.items.get(id)).filter((i) => i && !i.parent && i.bbox);
+  for (const i of top) if (i.bbox.x < 30 || i.bbox.y < 30 || i.bbox.x + i.bbox.w > 970 || i.bbox.y + i.bbox.h > 570) out.push(page.id + ': ' + i.id + ' leaves the page');
+  for (let a = 0; a < top.length; a++) for (let b = a + 1; b < top.length; b++) { const p = top[a].bbox, q = top[b].bbox; if (!(p.x + p.w + 4 <= q.x || q.x + q.w + 4 <= p.x || p.y + p.h + 4 <= q.y || q.y + q.h + 4 <= p.y)) out.push(page.id + ': ' + top[a].id + ' overlaps ' + top[b].id); } } return out; })()`);
 /** Wait until nothing on the board has changed for a while (drawing finished). */
 async function settled(quietMs = 2500, maxMs = 150000) {
   const start = Date.now(); let lastKey = null, since = Date.now();
   for (;;) {
     const st = await strokeState(), key = JSON.stringify([await count(), st.done, st.partial, st.waiting]);
-    if (key !== lastKey) { lastKey = key; since = Date.now(); }
+    // Steps may be waiting for their spoken cue, so a quiet board is not enough: the queue must be empty too.
+    const busy = await page("!!(window.__wb && (window.__wb.running || window.__wb.queue.length))");
+    if (key !== lastKey || busy) { lastKey = key; since = Date.now(); }
     if (Date.now() - since >= quietMs && st.partial === 0 && st.waiting === 0) return st;
     if (Date.now() - start > maxMs) throw new Error("drawing never settled: " + key);
     await sleep(150);
@@ -187,7 +204,7 @@ try {
   check("badge shows the animated board", (await badge()).includes("Animated"), await badge());
   const log1 = await page("window.__whiteboardLog.map((e) => e.kind)");
   check("diagnostics logged each stage (turn, planning, first step, drawing)", ["turn", "planning", "first-step", "animated"].every((k) => log1.includes(k)), JSON.stringify(log1));
-  console.log("      (first stroke visible " + firstStroke + " ms after the teacher message, including the 250 ms debounce; the fake Claude answers instantly)");
+  console.log("      (first stroke visible " + firstStroke + " ms after the teacher message; the fake Claude answers instantly, so this is the board's own overhead)");
 
   // 2. Follow-up adds to the board and the planner is told what is already there
   await page("__opts.onModeChange({ mode: 'listening' }); true");
@@ -225,12 +242,17 @@ try {
   check("the cancelled plan is reported in the log", (await events("planner")).some((m) => m.includes("cancelled")), JSON.stringify(await events("planner")));
   service.delayMs = 0;
 
-  // 5. Changing the subject: the model asks to clear, then draws new content
+  // 5. Changing the subject: a NEW PAGE, and the earlier pages are kept with their handwriting
+  const pagesBeforeTopic = (await wbState()).pages.length;
   await speak(topic.turns[0].teacher);
   await waitFor(() => has("nucleus"), "new subject drawn", 90000);
   await settled();
-  check("old subject is gone", !(await has("curve")) && !(await has("title")) && !(await has("chloroplast")));
-  check("new subject is on the board", (await Promise.all(["title2", "cell", "nucleus", "nlabel"].map(has))).every(Boolean));
+  check("topic change: the old subject is still in the notebook, on its earlier page", (await has("curve")) && (await has("title")) && (await has("eq")) && (await has("btitle")) && (await has("leaf"))); // biology was interrupted after its first two elements, so only those are guaranteed
+  check("topic change: the new subject is on a new page of its own", (await Promise.all(["title2", "cellg", "cell", "nucleus", "nlabel"].map(has))).every(Boolean) && (await wbState()).pages.length === pagesBeforeTopic + 1 && (await page("window.__wb.items.get('title2').page.number")) === pagesBeforeTopic + 1);
+  check("topic change: the earlier page still shows its own writing", (await page("window.__wb.items.get('eq').page.number")) === 1 && (await page("window.__wb.pages[0].g.querySelectorAll('[data-wb-hand] path').length")) > 20);
+  const nb = await pageButtons();
+  check("notebook controls: appear with one numbered button per page, the live page marked and current", (await visible("notebook")) && nb.length === pagesBeforeTopic + 1 && nb.at(-1).live && nb.at(-1).current && !(await returnVisible()), JSON.stringify(nb));
+  check("notebook controls: say which page it is", (await info()).startsWith("Page " + nb.length + " of " + nb.length) && (await info()).includes("(live)"), await info());
 
   // 6. Voice timing: with alignment events, a step waits for the words it belongs to
   await hear("Is anything else there?");
@@ -242,6 +264,130 @@ try {
   await waitFor(() => has("el"), "step released by the voice cue", 15000);
   check("the step draws once the voice reaches its cue", await has("el"));
   await settled();
+
+  // 6b. Student navigation: look at an earlier page while the teacher keeps speaking and writing
+  const total = (await wbState()).pages.length;
+  await click("pagePrev");
+  check("student: Previous goes back one page and says where the teacher is", (await info()).startsWith("Page " + (total - 1) + " of " + total) && (await info()).includes("teacher is on page " + total), await info());
+  check("student: Return to live page appears while looking at an older page", await returnVisible());
+  await clickPage(1);
+  check("student: a page button goes straight to that page; the older page is shown and the live page hidden", (await pageOpacity(1)) === "1" && (await pageOpacity(total)) === "0" && (await wbState()).followLive === false);
+  await hear("Can you show me the triangle steps again?");
+  await speak(fixtures.sentences.turns[0].teacher);
+  await waitFor(() => has("s3"), "teacher kept writing on the live page", 90000);
+  const dur = await wbState();
+  check("student: the teacher kept writing on the live page while the student was reading page 1", dur.view === "p1" && dur.live !== "p1" && (await page("window.__wb.items.get('s3').page.id")) === dur.live);
+  const nb2 = await pageButtons();
+  check("student: the student stayed on page 1 (control is never taken away) and the live page is flagged as having new writing", nb2[0].current && !nb2.at(-1).current && nb2.at(-1).live && (nb2.at(-1).unseen || dur.pages.at(-1).unseen) && (await returnVisible()), JSON.stringify(nb2));
+  await shoot("live_student_on_older_page");
+  await settled();
+  await click("pageLive");
+  const back = await wbState();
+  check("student: Return to live page goes to the teacher's page and follows again", back.view === back.live && back.followLive === true && !(await returnVisible()));
+  const problems = await overlaps();
+  check("every page so far: zero overlap and everything inside the page", problems.length === 0, problems.join(" | "));
+
+  // 6c. The teacher goes back to an earlier page, points at the equation, and returns
+  await hear("Wait, what was the first equation?");
+  const livePageBefore = (await wbState()).live, itemsBefore = await count();
+  let sawLiveOnP1 = false, sawRing = false, viewedP1 = false;
+  const watcher = setInterval(async () => { try { const st = await page("({ live: window.__wb.state().live, view: window.__wb.state().view, ring: !!document.querySelector('#wbBoard [data-wb-pointer]') })"); if (st.live === "p1") sawLiveOnP1 = true; if (st.ring) { sawRing = true; if (st.view === "p1") viewedP1 = true; } } catch {} }, 40);
+  await speak(fixtures.revisit.turns[0].teacher);
+  await waitFor(async () => sawRing, "pointing", 60000);
+  await settled(2500);
+  clearInterval(watcher);
+  check("revisit: the teacher went to page 1 and circled the equation there", sawLiveOnP1 && sawRing && viewedP1, JSON.stringify({ sawLiveOnP1, sawRing, viewedP1 }));
+  check("revisit: afterwards the teacher is back on the page being written, and nothing was added or changed", (await wbState()).live === livePageBefore && (await count()) === itemsBefore && !(await page("!!document.querySelector('#wbBoard [data-wb-pointer]')")), `${(await wbState()).live} vs ${livePageBefore}; ${await count()} vs ${itemsBefore}`);
+  check("revisit: the notebook marks exactly one live page", (await pageButtons()).filter((b) => b.live).length === 1);
+  // The student, reading page 1 meanwhile, is not moved
+  await hear("Okay. Let me look at page 1 myself.");
+  await clickPage(1);
+  const gatesBefore = await page("window.__wb.gates.length");
+  await speak(fixtures.revisit.turns[0].teacher + " ");
+  await waitFor(async () => (await page("window.__wb.gates.length")) > gatesBefore, "revisit planned again", 30000);
+  await settled(3000);
+  check("revisit: a student who is already reading page 1 stays there throughout", (await wbState()).view === "p1" && (await wbState()).followLive === false, JSON.stringify(await wbState()));
+  await click("pageLive");
+
+  // 6d. Planning in two parts when the agent streams its text (agent_chat_response_part), to start the pen earlier
+  await hear("Show me how to find the area of a triangle.");
+  const sentenceTurn = fixtures.sentences.turns[0], firstSentence = "First we look at the triangle. ";
+  await page("['s1','s2','s3'].forEach((id) => window.__wb.items.has(id) && window.__wb.removeItem(id)); true");
+  const requestsBefore = service.planner.length;
+  await page("__opts.onModeChange({ mode: 'speaking' }); __opts.onAgentChatResponsePart({ type: 'start', text: '' }); __opts.onAgentChatResponsePart({ type: 'delta', text: " + JSON.stringify(firstSentence) + " }); true");
+  await waitFor(() => has("s1"), "the first sentence is drawn before the reply is complete", 30000);
+  check("early start: the pen started from the first streamed sentence, before the full reply existed", service.planner.length === requestsBefore + 1 && !(await has("s2")) && service.planner.at(-1).messages[0].content.includes("First we look at the triangle."), service.planner.at(-1).messages[0].content.slice(-200));
+  check("early start: it says so in the log", (await events("turn")).some((m) => m.includes("Streaming text: planning from the first sentence")));
+  await page("__opts.onMessage({ source: 'ai', message: " + JSON.stringify(sentenceTurn.teacher) + " }); true");
+  await waitFor(() => has("s3"), "the rest is planned as a continuation", 60000);
+  const continuation = service.planner.at(-1).messages[0].content;
+  check("early start: the rest of the turn is planned as a continuation that knows what is already drawn", service.planner.length === requestsBefore + 2 && continuation.includes("Only plan what comes after") && continuation.includes("First we look at the triangle."), continuation.slice(-300));
+  check("early start: steps are drawn in speaking order across the two plans (1, 2, 3)", (await page("[...window.__wb.items.keys()].filter((k) => /^s[123]$/.test(k)).join(',')")) === "s1,s2,s3");
+  await settled(2500);
+
+  // 6e. ElevenLabs alignment with per-character times: each step starts when its own words are played
+  await hear("And the right angle?");
+  await page("['s1','s2','s3'].forEach((id) => window.__wb.items.has(id) && window.__wb.removeItem(id)); __opts.onModeChange({ mode: 'listening' }); true");
+  const alignedText = sentenceTurn.teacher, starts = Array.from(alignedText).map((_, i) => i * 40); // 40 ms per character
+  await speak(alignedText);
+  const t0a = Date.now();
+  await page(`__opts.onAudioAlignmentPlayback({ alignment: { chars: ${JSON.stringify(Array.from(alignedText))}, char_start_times_ms: ${JSON.stringify(starts)} } }); true`);
+  await sleep(150); const early = [await has("s1"), await has("s2"), await has("s3")];
+  await sleep(Math.max(0, 1700 - (Date.now() - t0a))); const mid = [await has("s1"), await has("s2"), await has("s3")];
+  await waitFor(() => has("s3"), "last step at its time", 20000); const lateAt = Date.now() - t0a;
+  check("alignment times: nothing is drawn before its words, and the last step waits for the last sentence", !early[2] && !mid[2] && lateAt > 1800, JSON.stringify({ early, mid, lateAt }));
+  check("alignment times: the second step was already drawn by the time the last sentence began", mid[1] === true, JSON.stringify(mid));
+  const syncLog = await events("sync");
+  check("alignment times: every released step is reported with its reason in the log", syncLog.length >= 3 && syncLog.some((m) => m.includes("aligned")), JSON.stringify(syncLog.slice(-3)));
+  await settled(2500);
+
+  // 6e2. Early plan and the final message arriving in the same instant: both plans must run (the second must not cancel the first)
+  await hear("One more time, the triangle please.");
+  await page("['s1','s2','s3'].forEach((id) => window.__wb.items.has(id) && window.__wb.removeItem(id)); __opts.onModeChange({ mode: 'listening' }); true");
+  const reqBeforeTick = service.planner.length;
+  await page("__opts.onModeChange({ mode: 'listening' }); __opts.onModeChange({ mode: 'speaking' }); __opts.onAgentChatResponsePart({ type: 'start', text: '' }); __opts.onAgentChatResponsePart({ type: 'delta', text: " + JSON.stringify(firstSentence) + " }); __opts.onMessage({ source: 'ai', message: " + JSON.stringify(sentenceTurn.teacher) + " }); true");
+  await waitFor(() => has("s3"), "both parts drawn", 60000);
+  check("same-instant early plan and final message: both plans ran and all three steps were drawn, in order", service.planner.length === reqBeforeTick + 2 && (await page("[...window.__wb.items.keys()].filter((k) => /^s[123]$/.test(k)).join(',')")) === "s1,s2,s3", `${service.planner.length - reqBeforeTick} requests`);
+  await settled(2500);
+
+  // 6e3. A teacher text that arrives long after its voice ended must not be taken for the start of the next turn
+  await hear("Say something short.");
+  await page("__opts.onModeChange({ mode: 'listening' }); __opts.onMessage({ source: 'ai', message: 'Late words that were never spoken aloud.' }); true");
+  await sleep(4400);
+  await page("['s1','s2','s3'].forEach((id) => window.__wb.items.has(id) && window.__wb.removeItem(id)); true");
+  await speak(sentenceTurn.teacher);
+  const freshClock = await page("({ text: window.__wb.clock.text, started: window.__wb.clock.startedAt !== null, ended: window.__wb.clock.endedAt !== null })");
+  check("late text: the next turn starts with a fresh clock (its own text and its own voice start)", freshClock.text === sentenceTurn.teacher && freshClock.started && !freshClock.ended, JSON.stringify(freshClock));
+  await sleep(300);
+  check("late text: so the last sentence of the next turn is not drawn early", !(await has("s3")));
+  await settled(2500);
+
+  // 6e4. Keyboard focus survives the teacher writing (the page buttons are updated in place, not rebuilt)
+  await page("document.querySelector('#pageList .pg').focus(); true");
+  const focusBefore = await page("document.activeElement.textContent");
+  await page("window.__wb.emit(); window.__wb.emit(); true");
+  await hear("Anything else?"); // a real conversation alternates student and teacher (otherwise the page merges the two teacher turns)
+  await page("document.querySelector('#pageList .pg').focus(); true");
+  await speak("Now one more small thing.");
+  await sleep(500);
+  await settled(1500);
+  check("page buttons keep keyboard focus while the teacher writes and the notebook changes", (await page("document.activeElement.className.includes('pg') && document.activeElement.textContent")) === focusBefore, await page("document.activeElement.tagName + ' ' + document.activeElement.textContent"));
+  await page("document.activeElement.blur(); true");
+
+  // 6f. A long lesson fills pages and starts new ones by itself
+  await page("window.__wb.timeScale = 14; true");
+  const pagesBeforeLong = (await wbState()).pages.length;
+  const longTurns = fixtures.longLesson(10).turns;
+  for (const turn of longTurns) { await hear("Tell me more."); await speak(turn.teacher); await waitFor(() => page(`window.__wb.items.has(${JSON.stringify(turn.ops[2].id)})`), "long lesson step " + turn.ops[2].id, 60000); await settled(600); await page("__opts.onModeChange({ mode: 'listening' }); true"); }
+  await settled(2500);
+  const afterLong = await wbState();
+  check("long lesson: pages were created automatically as they filled", afterLong.pages.length >= pagesBeforeLong + 2, `${pagesBeforeLong} -> ${afterLong.pages.length}`);
+  check("long lesson: the notebook lists every page and the student's view followed the teacher", (await pageButtons()).length === afterLong.pages.length && afterLong.view === afterLong.live, JSON.stringify(afterLong));
+  const problemsLong = await overlaps();
+  check("long lesson: zero overlap and everything inside the page, on every page, on the real page", problemsLong.length === 0, problemsLong.slice(0, 4).join(" | "));
+  check("long lesson: every earlier page is still intact", (await has("eq")) && (await has("curve")) && (await has("lt0")) && (await has("lt" + (longTurns.length - 1))));
+  await page("window.__wb.timeScale = 2; true");
+  await shoot("live_notebook");
 
   // 7. THE AGENT'S show_on_board TOOL: in Animated mode its finished HTML must not appear at once.
   await hear("Can you show me a triangle?");
@@ -317,11 +463,20 @@ try {
   await page("__opts.clientTools.show_on_board({ content: '<h2>Tool board</h2><p>from the agent</p>' }); true");
   check("Classic setting: the agent's show_on_board tool paints the classic board as before", (await page("document.getElementById('board').textContent")).includes("Tool board") && service.planner.length === 0);
 
+  // 11. The planner model chosen in Setup is the one used
+  service.planner.length = 0;
+  await load("animated", "claude-haiku-5-5");
+  await speak(math.turns[0].teacher);
+  await waitFor(() => service.planner.length > 0, "planner request", 8000);
+  check("Setup: the faster planner model (Haiku 5.5) is used when chosen", service.planner[0].model === "claude-haiku-5-5", service.planner[0].model);
+  check("planner prompt includes the notebook summary", service.planner[0].messages[0].content.includes("Notebook:"));
+
   check("no uncaught errors in the page", pageErrors.length === 0, pageErrors.join(" | "));
 } catch (error) {
   failures++; console.log("FAIL  test run aborted  -> " + (error.stack || error));
   console.log("page errors so far: " + JSON.stringify(pageErrors));
   console.log("last whiteboard log: " + JSON.stringify(await page("window.__whiteboardLog.slice(-8)").catch(() => null)));
+  console.log("hidden strokes belong to: " + JSON.stringify(await page("[...document.querySelectorAll('#wbBoard [data-wb-hand] path')].filter((p) => p.style.visibility === 'hidden').map((p) => { const own = p.closest('[data-wb-id]'); return own && own.dataset.wbId + '@' + (own.closest('[data-wb-page]') || {}).dataset.wbPage + ' text=' + (window.__wb.items.get(own.dataset.wbId) || {}).text; })").catch(() => null)));
   console.log("board state: " + JSON.stringify(await page("({ ids: [...document.querySelectorAll('#wbBoard [data-wb-id]')].map((e) => e.dataset.wbId), hidden: document.hidden, wbHidden: document.getElementById('wbBoard').hidden })").catch(() => null)) + " strokes " + JSON.stringify(await strokeState().catch(() => null)));
 }
 console.log(failures ? "\n" + failures + " check(s) FAILED" : "\nALL CHECKS PASSED");
