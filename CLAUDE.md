@@ -55,13 +55,24 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 <!-- TODO: update as folders are created -->
 ```
 /            → root config, this file, README
+/ai-teacher/          → talking AI teacher, ElevenLabs version (open index.html; see its README)
+/ai-teacher/laptop/   → earlier version: Anthropic API + browser voices
+/ai-teacher/whiteboard-font.js → single-stroke handwriting font data (Hershey, licence note inside)
+/ai-teacher/whiteboard-hand.js → handwriting engine: text and maths as pen strokes, pen timeline
+/ai-teacher/whiteboard-layout.js → page layout engine: places every element in free space, never overlaps, tells the board when to start a new page
+/ai-teacher/whiteboard-diagram.js → diagram layout engine: nodes and links to padded shapes, routed connectors, labels beside lines; also graph label placement
+/ai-teacher/PROPOSAL-teaching-coordinator.md → options for tighter voice/whiteboard coordination (needs approval)
+/ai-teacher/whiteboard-core.js → animated whiteboard: schema check, safe maths parser, streaming Claude planner, speech clock (ties steps to the teacher's words)
+/ai-teacher/whiteboard.js      → animated whiteboard: multi-page notebook renderer, pencil, drawing queue, interruption, page navigation
+/ai-teacher/test/     → whiteboard tests and simulated lessons (not used by the product)
+/student-website/     → clickable prototype of the school site (browser-only data, not secure yet)
 ```
 
 ## Commands
 <!-- TODO: fill in once the project is scaffolded -->
 - Install: ``
 - Run locally: ``
-- Test: ``
+- Test: `node --test ai-teacher/test/core.test.js ai-teacher/test/hand.test.js ai-teacher/test/layout.test.js ai-teacher/test/diagram.test.js` and `node ai-teacher/test/integration.mjs` (needs Chrome); in a browser open `ai-teacher/test/handwriting.html` (slow-motion pen test) and add `?selftest` to it or to `ai-teacher/test/browser.html`
 - Lint / format: ``
 
 ## How we work (rules for humans AND Claude)
@@ -92,3 +103,13 @@ Studyw-AI is an online school. Students take live classes with an **AI teacher**
 - 2026-11-09: Created repo; using branches + PRs, CLAUDE.md as shared context.
 - 2026-11-09: Human-teacher classes use Jitsi Meet (free). AI teacher voice moving to ElevenLabs.
 - 2026-11-09: Next milestone: deploy the site with real, secure, role-based logins.
+- 2026-11-09: AI teacher prototype added in /ai-teacher: ElevenLabs agent (Claude as LLM) for voice and interruptions, Claude via the Anthropic API for the whiteboard. Keys are entered in the browser, never committed.
+- 2026-11-10: Student website prototype added in /student-website. Data and roles live in the browser only, so it is a design reference until the real backend exists.
+- 2026-11-16: Animated whiteboard added to the ElevenLabs teacher: a separate Claude call streams schema-checked drawing steps that are drawn by hand (pen strokes from a single-stroke font plus our own maths typesetter, pencil tip visible), no external libraries. The agent's `show_on_board` tool is routed into it instead of painting finished HTML. The classic whole-sketch board stays as the fallback and every fallback is shown (badge, status line, console). Voice sync is time-estimated unless the agent sends character timing.
+- 2026-11-16: The whiteboard became a multi-page teaching notebook. A layout engine places every element (Claude no longer gives positions), starts a new page before drawing when one is full, and keeps all pages; the student can browse pages while the teacher keeps writing on the live page; the teacher can create pages, go to earlier pages and point at earlier content. Steps are tied to the teacher's words (cues) and drawn when those words are reached: exactly if ElevenLabs sends audio alignment (WebSocket only), estimated otherwise.
+- 2026-11-16: The planner now chooses a teaching moment per turn (speak only, write, draw, point, wait), diagrams are described semantically (nodes, links, containers) and laid out by the board (no coordinates from Claude), and spoken references to visuals are scheduled so the picture is ready and the lateness is measured. Whether the existing ElevenLabs agent can fully guarantee voice/board sync is documented in `ai-teacher/PROPOSAL-teaching-coordinator.md`; no agent setting was changed.
+- 2026-11-16: Pacing: the whiteboard measures the pencil against the voice and feeds it back to the planner; session-only teaching hints are sent to the agent with `sendContextualUpdate` (switchable in Setup; the agent's saved settings are untouched and live speech cannot be slowed or paused from the page). Larger coordination changes are in `ai-teacher/PROPOSAL-teaching-coordinator.md`, awaiting approval.
+- 2026-11-16: Whiteboard writing changed from the cursive Hershey face to the printed single-stroke Hershey "futural" face (clear teacher-style printing), with a little more letter spacing and larger sizes everywhere (text 34 to 39, title 46 to 52, small 28 to 32, diagram labels 28 to 32, graph labels bigger). The pen animation is unchanged. Diagrams are now suggested at 5 nodes or fewer because larger writing is never shrunk.
+- 2026-11-16: Overlaps are now checked on real stroke geometry (`Whiteboard.audit`), graph labels are placed by their letter strokes in a gutter beside each graph (wrap, slide, or become a note; never overlap, shrink or drop), and per-turn conversation latency is measured (Turn timing panel). Planner calls for tiny acknowledgements are skipped and context updates to the agent are throttled. No agent setting was changed.
+- 2026-11-17: Long-session reliability. A 60-turn simulated lesson (test/longsession.mjs) showed flat memory, timers and frame time, but the page's own overlap check grew to about 300 ms of blocked page; it now measures only changed pages, waits while the voice is busy and backs off. Board-status hints to the agent are capped (every 90 s, 8 at most). New Session health monitor (by layer: connection, microphone/voice activity, transcription, agent, playback, page), a Reconnect button that keeps the board and sends a short summary to a new session (never a silent reconnect), planner calls time out after 45 s. The original 3-5 minute onset is NOT reproduced by the simulation and still needs a real extended lesson; no agent setting was changed.
+

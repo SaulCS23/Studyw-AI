@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Handwriting slow-motion test</title>
+<style>
+/* Test bench: watch the whiteboard pen write, in slow motion, and see that real strokes are drawn. Not part of the product. */
+:root{--bg:#eef1ec;--ink:#1d2a26;--muted:#566660;--accent:#2f6b57;--accent-ink:#fff;--surface:#fff;--line:#c9d1cc;--frame:#b9c2bd}
+@media (prefers-color-scheme:dark){:root{--bg:#111715;--ink:#e6ede9;--muted:#9fb0a9;--accent:#6fbf9f;--accent-ink:#0d1512;--surface:#1a2320;--line:#2c3833;--frame:#3a4a44;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,"Segoe UI",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:16px}
+h1{font-size:1.3rem;margin:0 0 4px}
+p{margin:0 0 12px;color:var(--muted);max-width:75ch}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+button,select{font:inherit}
+button{font-weight:700;border:1px solid var(--accent);background:transparent;color:var(--accent);border-radius:10px;padding:8px 14px;cursor:pointer}
+button.solid{background:var(--accent);color:var(--accent-ink)}
+select{color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+:focus-visible{outline:3px solid #e8b23a;outline-offset:2px}
+label{display:inline-flex;gap:6px;align-items:center;color:var(--muted)}
+.board{border:10px solid var(--frame);border-radius:6px;aspect-ratio:5/3;width:100%;max-height:68vh}
+.hud{margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;font-variant-numeric:tabular-nums}
+.hud div{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
+.hud b{display:block;font-size:1.3rem}
+.hud span{color:var(--muted);font-size:.85rem}
+.pen-down b{color:var(--accent)}
+#results{white-space:pre-wrap;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px}
+#results:empty{display:none}
+#log{margin-top:10px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--muted);white-space:pre-wrap}
+</style>
+</head>
+<body>
+<main>
+  <h1>Handwriting slow-motion test</h1>
+  <p>Press a button and watch the pen. Every letter, number, symbol, graph label and arrow is drawn stroke by stroke: the pencil tip travels along each stroke, lifts (it goes pale) and moves to the next. Use the speed menu to slow it right down, and "Colour each stroke" to see the stroke order. Add <code>?selftest</code> to run the automatic checks.</p>
+  <div class="bar">
+    <label>Speed <select id="speed" aria-label="Playback speed">
+      <option value="0.15">Very slow (0.15x)</option>
+      <option value="0.3" selected>Slow motion (0.3x)</option>
+      <option value="0.6">Half speed (0.6x)</option>
+      <option value="1">Real speed (1x)</option>
+      <option value="3">Fast (3x)</option>
+    </select></label>
+    <label><input type="checkbox" id="colors"> Colour each stroke</label>
+  </div>
+  <div class="bar" id="bar"></div>
+  <div class="board" id="board"></div>
+  <div class="hud" id="hud" aria-live="off">
+    <div><b id="hudDone">0 / 0</b><span>strokes finished</span></div>
+    <div id="hudPenBox"><b id="hudPen">pen up</b><span>pencil state</span></div>
+    <div><b id="hudPos">-</b><span>pencil position (board units)</span></div>
+    <div><b id="hudItems">0</b><span>elements on the board</span></div>
+    <div><b id="hudKinds">0 / 0</b><span>handwritten / typed fallback</span></div>
+  </div>
+  <div id="results" aria-live="polite"></div>
+  <div id="log"></div>
+</main>
+<script src="../whiteboard-font.js"></script>
+<script src="../whiteboard-hand.js"></script>
+<script src="../whiteboard-layout.js"></script>
+<script src="../whiteboard-diagram.js"></script>
+<script src="../whiteboard-core.js"></script>
+<script src="../whiteboard.js"></script>
+<script src="fixtures.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const core = WhiteboardCore, lesson = WhiteboardFixtures.handwriting;
+const logLines = [];
+const logSink = (level, message) => { logLines.push(level + ": " + message); $("log").textContent = logLines.slice(-6).join("\n"); };
+
+let wb;
+function makeBoard(options) {
+  $("board").innerHTML = "";
+  wb = new Whiteboard($("board"), { timeScale: Number($("speed").value), debugStrokeColors: $("colors").checked, log: logSink, ...(options || {}) });
+  return wb;
+}
+makeBoard();
+$("speed").onchange = () => { wb.timeScale = Number($("speed").value); };
+$("colors").onchange = () => { wb.debugStrokeColors = $("colors").checked; };
+
+function play(board, turn) {
+  const { ops, errors } = core.validatePlan({ ops: turn.ops }, board.context());
+  if (errors.length) logSink("warn", "rejected: " + errors.join("; "));
+  board.enqueue(ops.map(({ cue, ref, ...step }) => (step.parts ? { ...step, parts: step.parts.map(({ cue: c, ref: r, ...part }) => part) } : step))); // this page is about the pen, not about syncing to speech: draw each step (and each diagram part) at once
+  return ops;
+}
+async function playTurns(board, turns) { for (const turn of turns) { play(board, turn); await board.idle(); } }
+
+[["Words and equations", 0], ["Graph", 1], ["Diagram", 2]].forEach(([name, index]) => {
+  const b = document.createElement("button"); b.type = "button"; b.className = "solid"; b.textContent = name; b.onclick = () => play(wb, lesson.turns[index]); $("bar").appendChild(b);
+});
+[["Play all", () => playTurns(wb, lesson.turns)], ["Interrupt", () => wb.cancelPending()], ["Clear board", () => wb.reset()]].forEach(([name, fn]) => {
+  const b = document.createElement("button"); b.type = "button"; b.textContent = name; b.onclick = fn; $("bar").appendChild(b);
+});
+
+setInterval(() => {
+  const s = wb.stats;
+  $("hudDone").textContent = s.strokesDone + " / " + s.strokesTotal;
+  $("hudPen").textContent = s.penDown ? "pen DOWN (writing)" : (wb.pencil.style.opacity > 0 ? "pen lifted (moving)" : "pen up");
+  $("hudPenBox").className = s.penDown ? "pen-down" : "";
+  $("hudPos").textContent = s.pen ? Math.round(s.pen.x) + ", " + Math.round(s.pen.y) : "-";
+  $("hudItems").textContent = wb.items.size;
+  $("hudKinds").textContent = s.handwritten + " / " + s.fallbackText;
+}, 100);
+
+if (params.get("speed")) wb.timeScale = Number(params.get("speed"));
+if (params.get("colors")) { $("colors").checked = true; wb.debugStrokeColors = true; }
+if (params.get("play") !== null) { const n = Number(params.get("play")); if (n >= 0 && n < 3) play(wb, lesson.turns[n]); else playTurns(wb, lesson.turns); }
+if (params.has("selftest")) selfTest();
+
+/* ---------- Automatic checks ---------- */
+async function selfTest() {
+  const out = []; let failures = 0;
+  const check = (name, ok, detail) => { if (!ok) failures++; out.push((ok ? "PASS  " : "FAIL  ") + name + (!ok && detail !== undefined ? "  -> " + detail : "")); $("results").textContent = out.join("\n"); };
+  const ops = (list, board) => core.validatePlan({ ops: list }, board ? board.context() : undefined).ops;
+  const pathsOf = (item) => [...item.g.querySelectorAll("path")];
+  const sample = (item) => {
+    const paths = pathsOf(item); let done = 0, hidden = 0, partial = 0;
+    for (const p of paths) {
+      if (p.style.visibility === "hidden") { hidden++; continue; }
+      const off = parseFloat(p.style.strokeDashoffset);
+      if (p.style.strokeDashoffset === "" || off === 0) done++; else partial++;
+    }
+    const m = /translate\(([-\d.]+) ([-\d.]+)\)/.exec(wb.pencil.getAttribute("transform") || "");
+    return { done, hidden, partial, total: paths.length, pencil: +wb.pencil.style.opacity, x: m ? +m[1] : null, y: m ? +m[2] : null };
+  };
+  const watch = async (item, ms, step = 60) => { const frames = []; const t0 = performance.now(); while (performance.now() - t0 < ms) { frames.push(sample(item)); await sleep(step); } return frames; };
+
+  try {
+    // 1. A word is written stroke by stroke, with the pen visibly travelling
+    makeBoard({ timeScale: 0.5 });
+    wb.enqueue(ops([{ op: "write", kind: "text", content: "Rome", id: "w" }]));
+    await sleep(120);
+    const word = wb.items.get("w");
+    const frames = await watch(word, 3200);
+    await wb.idle();
+    const total = pathsOf(word).length, final = sample(word);
+    check("a word is made of several pen strokes, not one image", total >= 4, total);
+    check("some strokes were finished while others had not started yet", frames.some((f) => f.done >= 1 && f.hidden >= 1), JSON.stringify(frames.slice(0, 3)));
+    check("a stroke was caught half drawn (a letter in the middle of being written)", frames.some((f) => f.partial >= 1), "no partial stroke seen in " + frames.length + " frames");
+    check("finished-stroke count only ever goes up", frames.every((f, i) => i === 0 || f.done >= frames[i - 1].done));
+    check("every stroke is complete at the end", final.done === total && final.hidden === 0 && final.partial === 0, JSON.stringify(final));
+    const moving = frames.filter((f) => f.pencil > 0 && f.x !== null);
+    const distinct = new Set(moving.map((f) => Math.round(f.x) + "," + Math.round(f.y))).size;
+    check("the pencil is visible and moves while writing", moving.length > 10 && distinct > 10, moving.length + " frames, " + distinct + " positions");
+    const b = word.bbox, travelled = moving.reduce((sum, f, i) => i ? sum + Math.hypot(f.x - moving[i - 1].x, f.y - moving[i - 1].y) : 0, 0);
+    check("the pencil stays on the writing", moving.every((f) => f.x >= b.x - 40 && f.x <= b.x + b.w + 40 && f.y >= b.y - 40 && f.y <= b.y + b.h + 40) && travelled > 60, Math.round(travelled));
+    check("the pencil is put away afterwards", wb.pencil.style.opacity === "0");
+    check("it is drawn as strokes, not typed text or HTML", !word.g.querySelector("foreignObject, text, tspan, img"));
+    check("the pen lifts between strokes (pale pencil seen)", frames.some((f) => f.pencil > 0 && f.pencil < 1));
+
+    // 2. An equation, with a fraction and a root, is also handwriting
+    makeBoard({ timeScale: 0.7 });
+    wb.enqueue(ops([{ op: "write", kind: "math", content: "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}", id: "q" }]));
+    await sleep(100);
+    const eq = wb.items.get("q"), eqFrames = await watch(eq, 4500, 100);
+    await wb.idle();
+    const doneCounts = new Set(eqFrames.map((f) => f.done));
+    check("an equation is drawn progressively, symbol by symbol", doneCounts.size >= 8 && eqFrames.some((f) => f.partial >= 1), doneCounts.size + " distinct counts");
+    check("equation strokes include the fraction bar and the root", pathsOf(eq).length >= 18 && !eq.g.querySelector("foreignObject, text, .katex"), pathsOf(eq).length);
+
+    // 3. Graph numbers and labels are written, not typed
+    makeBoard({ timeScale: 30 });
+    wb.enqueue(ops(lesson.turns[1].ops.slice(1)));
+    await wb.idle();
+    const graph = wb.items.get("gg");
+    check("graph numbers and axis labels are handwritten strokes", !graph.g.querySelector("text") && graph.g.querySelectorAll("[data-wb-hand]").length >= 2, graph.g.querySelectorAll("text").length + " <text> elements");
+    check("curve labels and point labels are handwritten too", !wb.svg.querySelector("text") && wb.items.get("sine").g.querySelector("[data-wb-hand]") && wb.items.get("o").g.querySelector("[data-wb-hand]"));
+
+    // 4. Interrupting mid-word: the pen finishes its stroke and stops, nothing is half drawn
+    makeBoard({ timeScale: 0.4 });
+    wb.enqueue(ops([{ op: "write", kind: "text", content: "Photosynthesis in plants", id: "long" }, { op: "write", kind: "text", content: "never drawn", id: "after" }]));
+    await sleep(900);
+    wb.cancelPending(); await wb.idle();
+    const cut = wb.items.get("long"), after = sample(cut);
+    await sleep(1200);
+    check("interrupt: some of the word is written, the rest is not", after.done >= 1 && after.hidden >= 1, JSON.stringify(after));
+    check("interrupt: the pen finishes its stroke (nothing is left half drawn)", after.partial === 0, JSON.stringify(after));
+    check("interrupt: nothing more is drawn afterwards and the next step is dropped", JSON.stringify(sample(cut)) === JSON.stringify(after) && !wb.items.has("after") && wb.queue.length === 0);
+    check("interrupt: the unfinished writing is flagged for the planner", cut.text.endsWith("(unfinished)"), cut.text);
+    check("interrupt: the pencil is put away", wb.pencil.style.opacity === "0");
+
+    // 5. Pace follows the speech: more speech left means a slower hand, little left means a quicker one
+    const timed = async (speechLeft) => {
+      makeBoard({ timeScale: 6, speechLeftMs: () => speechLeft });
+      const t = performance.now();
+      wb.enqueue(ops([{ op: "write", kind: "text", content: "Plants make sugar", id: "p" }]));
+      await wb.idle(); return performance.now() - t;
+    };
+    const slow = await timed(30000), quick = await timed(0);
+    check("the hand slows down when the teacher has a lot left to say and speeds up when nearly finished", slow > quick * 1.5, Math.round(slow) + " ms vs " + Math.round(quick) + " ms");
+
+    // 5b. Regression: pacing against the speech must work for every kind of step (a plot once made the pace NaN and froze the board)
+    for (const op of ops([{ op: "graph", id: "gg", x: 200, y: 50, w: 600, h: 400, xmin: -3, xmax: 3, ymin: -3, ymax: 3 }, { op: "plot", graph: "gg", fn: "x", id: "pl" }, { op: "point", graph: "gg", px: 1, py: 1, label: "p", id: "pt" }, { op: "shape", shape: "circle", x: 100, y: 500, r: 30, id: "ci" }, { op: "highlight", target: "gg" }, { op: "pause", ms: 200 }])) {
+      const probe = makeBoard({ timeScale: 20, speechLeftMs: () => 8000 });
+      check("every step kind has a finite duration (" + op.op + ")", Number.isFinite(probe.naturalMs(op)) && probe.naturalMs(op) > 0, probe.naturalMs(op));
+    }
+    makeBoard({ timeScale: 20, speechLeftMs: () => 8000 });
+    wb.enqueue(ops(lesson.turns[1].ops.slice(1)));
+    const finished = await Promise.race([wb.idle().then(() => true), sleep(15000).then(() => false)]);
+    check("a graph with curves drawn while the teacher is still talking finishes (does not stall)", finished && wb.items.has("sine") && wb.stats.strokesDone === wb.stats.strokesTotal, "finished=" + finished);
+    makeBoard({ timeScale: 20 }); wb.speechLeftMs = () => NaN;
+    wb.enqueue(ops([{ op: "write", content: "bad pace", id: "bp" }]));
+    check("even a broken speech estimate cannot freeze the board", await Promise.race([wb.idle().then(() => true), sleep(8000).then(() => false)]));
+
+    // 6. Reduced motion: instant, complete, no pencil
+    makeBoard({ reducedMotion: true });
+    wb.enqueue(ops([{ op: "write", kind: "text", content: "Rome", id: "r" }])); await wb.idle();
+    const rm = sample(wb.items.get("r"));
+    check("reduced motion: writing appears at once, fully drawn", rm.done === rm.total && wb.pencil.style.opacity === "0", JSON.stringify(rm));
+
+    // 7. Alphabets the font cannot draw fall back to typed text, and say so
+    const logs = []; makeBoard({ timeScale: 30, log: (level, message) => logs.push(level + ": " + message) });
+    wb.enqueue(ops([{ op: "write", kind: "text", content: "你好 world", id: "cjk" }])); await wb.idle();
+    check("unsupported alphabets use the typed-text fallback", wb.stats.fallbackText === 1 && !!wb.items.get("cjk").g.querySelector("foreignObject"));
+    check("the fallback is reported in the log", logs.some((l) => l.startsWith("warn") && l.includes("你")), logs.join(" | "));
+
+    // 8. The whole showcase draws without errors
+    const errors = []; makeBoard({ timeScale: 40, log: (level, message) => { if (level !== "info") errors.push(message); } });
+    await playTurns(wb, lesson.turns);
+    check("the full showcase (words, equations, graph, diagram) draws cleanly", wb.items.size >= 10 && errors.length === 0, errors.join(" | ") + " items=" + wb.items.size);
+    check("stroke counter matches: every stroke started was finished", wb.stats.strokesDone === wb.stats.strokesTotal, wb.stats.strokesDone + "/" + wb.stats.strokesTotal);
+
+    // 9. Stroke-order colours
+    makeBoard({ timeScale: 30, debugStrokeColors: true });
+    wb.enqueue(ops([{ op: "write", kind: "text", content: "Rome", id: "c" }])); await wb.idle();
+    check("stroke-order colouring gives each stroke its own colour", new Set(pathsOf(wb.items.get("c")).map((p) => p.style.stroke)).size >= 3);
+  } catch (error) {
+    check("self-test ran to the end", false, error && (error.stack || error.message || error));
+  }
+  out.push("", failures ? failures + " check(s) FAILED" : "ALL CHECKS PASSED");
+  $("results").textContent = out.join("\n");
+  document.title = failures ? "SELFTEST FAIL" : "SELFTEST PASS";
+}
+</script>
+</body>
+</html>

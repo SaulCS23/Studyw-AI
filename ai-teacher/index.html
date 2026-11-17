@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Talking Teacher Live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Atkinson+Hyperlegible:wght@400;700&family=Kalam:wght@400;700&display=swap">
+<!-- Animated whiteboard: a handwriting engine (stroke font + maths typesetter) and an SVG renderer. No external libraries. -->
+<script defer src="whiteboard-font.js"></script>
+<script defer src="whiteboard-hand.js"></script>
+<script defer src="whiteboard-layout.js"></script>
+<script defer src="whiteboard-diagram.js"></script>
+<script defer src="whiteboard-core.js"></script>
+<script defer src="whiteboard.js"></script>
+<style>
+/* Layout: the whiteboard fills the room, subtitles under it, one big call button along the bottom. */
+:root{
+  --bg:#eef1ec; --surface:#ffffff; --ink:#1d2a26; --muted:#5d6b66; --line:#d3dad5;
+  --accent:#2f6b57; --accent-ink:#ffffff; --pencil:#e8b23a; --danger:#b4462f;
+  --board:#fbfcfa; --board-ink:#1f3b8a; --board-frame:#b9c2bd; --caption-bg:#18211e; --caption-ink:#f4f7f5;
+  --display:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;
+  --body:"Atkinson Hyperlegible","Segoe UI",system-ui,sans-serif;
+  --hand:"Kalam","Comic Sans MS","Segoe Print",cursive;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#111715; --surface:#1a2320; --ink:#e6ede9; --muted:#9aaba4; --line:#2c3833;
+  --accent:#6fbf9f; --accent-ink:#0d1512; --pencil:#f0c35a; --danger:#e07a63;
+  --board:#1e2b27; --board-ink:#eef3ea; --board-frame:#3a4a44; --caption-bg:#000000; --caption-ink:#f4f7f5; color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);font-size:16px;line-height:1.5}
+.app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr);grid-auto-rows:auto;gap:12px;padding:12px 16px 14px;max-width:1200px;margin:0 auto}
+.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.top h1{font-family:var(--display);font-size:1.45rem;margin:0;font-weight:700}
+.status{color:var(--muted);flex:1;min-width:0}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:.85rem;padding:3px 10px;border-radius:999px;background:var(--surface);border:1px solid var(--line)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+/* Notebook controls: previous / next / page numbers / back to the teacher's page. */
+.notebook{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.notebook .btn{padding:6px 12px}
+.notebook .btn[disabled]{opacity:.45;cursor:default}
+.pagelist{display:flex;gap:6px;overflow-x:auto;padding:2px;max-width:100%}
+.pg{position:relative;min-width:2.2rem;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:700;cursor:pointer}
+.pg[aria-current="page"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.pg.live::after{content:"";position:absolute;top:-3px;right:-3px;width:9px;height:9px;border-radius:50%;background:var(--danger);border:2px solid var(--bg)}
+.pg.unseen{border-color:var(--pencil);box-shadow:0 0 0 2px var(--pencil)}
+.pageinfo{color:var(--muted);font-size:.92rem;margin-left:auto}
+#pageLive{margin-left:4px}
+#boardBadge.warn{border-color:var(--danger);color:var(--danger);font-weight:700}
+#boardBadge.live{border-color:var(--accent);color:var(--accent)}
+[data-mode="listening"] .dot{background:var(--danger)}
+[data-mode="connecting"] .dot{background:var(--pencil)}
+[data-mode="speaking"] .dot{background:var(--accent)}
+button{font:inherit}
+.btn{font-weight:700;border-radius:10px;padding:8px 14px;cursor:pointer;border:1px solid var(--accent);background:transparent;color:var(--accent)}
+.btn.solid{background:var(--accent);color:var(--accent-ink)}
+:focus-visible{outline:3px solid var(--pencil);outline-offset:2px}
+.board{background:var(--board);color:var(--board-ink);border:10px solid var(--board-frame);border-radius:6px;min-height:0;overflow:auto;padding:22px 28px;font-family:var(--hand);font-size:1.45rem;line-height:1.35}
+.board h2{font-size:2rem;margin:0 0 .3em;font-weight:700;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:6px}
+.board h3{font-size:1.5rem;margin:.6em 0 .2em}
+.board p{margin:.3em 0}
+.board ul,.board ol{margin:.3em 0 .3em 1.2em;padding:0}
+.board svg{display:block;max-width:100%;height:auto;max-height:52vh;margin:.4em auto;color:var(--board-ink)}
+.board svg text{font-family:var(--hand);fill:currentColor}
+.board .hl{color:var(--danger)}
+.board table{border-collapse:collapse;margin:.4em 0}.board td,.board th{border:2px solid currentColor;padding:2px 10px}
+.board.fresh{animation:wipe .45s ease-out}
+@keyframes wipe{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+@media (prefers-reduced-motion:reduce){.board.fresh{animation:none}}
+/* The animated board shares the classic board's frame; only one of the two shows at a time. */
+[hidden]{display:none!important}
+.wbboard{padding:0;overflow:hidden}
+.caption{background:var(--caption-bg);color:var(--caption-ink);border-radius:10px;padding:12px 18px;min-height:3.6em;font-size:1.3rem;line-height:1.4;text-align:center;text-wrap:balance}
+.caption.you{font-style:italic;opacity:.85}
+.health{border-radius:10px;padding:10px 14px;background:var(--surface);border:2px solid var(--line);font-size:.95rem;color:var(--ink);display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap}
+.health.error{border-color:var(--danger)} .health.warn{border-color:var(--pencil)}
+.health .layer{font-weight:700} .health .more{color:var(--muted);font-size:.85rem;margin-top:4px}
+.health .actions{margin-left:auto}
+.timing{font-size:.9rem;color:var(--muted)}
+.timing summary{cursor:pointer;padding:4px 2px}
+.timing table{border-collapse:collapse;width:100%;margin-top:4px}
+.timing td{padding:3px 8px;border-top:1px solid var(--line);vertical-align:top}
+.timing td.ms{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--ink)}
+.timing .na{color:var(--muted);font-style:italic}
+.timing .verdict{margin-top:6px;color:var(--ink)}
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.call{border:none;border-radius:999px;padding:14px 26px;font-weight:700;font-size:1.05rem;cursor:pointer;background:var(--accent);color:var(--accent-ink);display:inline-flex;gap:10px;align-items:center}
+.call.live{background:var(--danger)}
+.call svg{width:22px;height:22px}
+.controls form{display:flex;gap:8px;flex:1;min-width:240px}
+input,select,textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 11px;min-width:0}
+.controls input{flex:1}
+dialog{border:none;border-radius:14px;padding:0;max-width:720px;width:calc(100% - 32px);background:var(--surface);color:var(--ink)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.dlg{padding:20px 22px;display:flex;flex-direction:column;gap:14px;max-height:88vh;overflow:auto}
+.dlg h2{font-family:var(--display);margin:0;font-size:1.3rem}
+.dlg ol{margin:0;padding-left:1.3em;display:flex;flex-direction:column;gap:10px}
+label{display:flex;flex-direction:column;gap:4px;font-size:.78rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+label input{text-transform:none;letter-spacing:0;font-size:1rem}
+.copybox{position:relative}
+.copybox textarea{width:100%;min-height:120px;font-size:.88rem;resize:vertical}
+.copybox .btn{position:absolute;top:6px;right:6px;padding:4px 10px;font-size:.85rem;background:var(--surface)}
+code{background:var(--bg);padding:1px 6px;border-radius:5px}
+.small{font-size:.88rem;color:var(--muted);margin:0}
+</style>
+</head>
+<body>
+<div class="app" id="app" data-mode="idle">
+  <div class="top">
+    <h1>Talking Teacher Live</h1>
+    <span class="pill"><span class="dot"></span><span id="modeWord">Not started</span></span>
+    <span class="pill" id="boardBadge" role="status" title="Which whiteboard drew the latest turn. Details are in the browser console (Cmd+Option+J).">Board: Animated</span>
+    <span class="status" id="status"></span>
+    <button class="btn" id="openSetup" type="button">Setup</button>
+  </div>
+
+  <div class="board" id="board">
+    <h2>Welcome to class</h2>
+    <p>Press <b>Start lesson</b> and just talk, like a phone call.</p>
+    <p>I'll draw on this board while I explain.</p>
+    <p class="hl">Interrupt me whenever you want. I'll stop and listen.</p>
+  </div>
+  <div class="board wbboard" id="wbBoard" hidden></div>
+  <nav class="notebook" id="notebook" aria-label="Notebook pages" hidden>
+    <button class="btn" id="pagePrev" type="button">Previous</button>
+    <div class="pagelist" id="pageList" role="group" aria-label="Go to page"></div>
+    <button class="btn" id="pageNext" type="button">Next</button>
+    <button class="btn solid" id="pageLive" type="button" hidden>Return to live page</button>
+    <span class="pageinfo" id="pageInfo" aria-live="polite">Page 1 of 1</span>
+  </nav>
+
+  <div class="caption" id="caption">Subtitles will appear here.</div>
+  <div class="health" id="health" role="status" aria-live="polite" hidden><div><div id="healthText"></div><div class="more" id="healthMore"></div></div><div class="actions"><button class="btn" id="reconnect" type="button" hidden>Reconnect (keeps the board)</button></div></div>
+  <details class="timing" id="timing"><summary id="timingSummary">Turn timing (how quickly the teacher answers)</summary><div id="timingBody">Timing appears after your first turn. Only numbers are shown: no speech, text or keys.</div><button class="btn" id="copyDiag" type="button">Copy diagnostics (numbers only)</button></details>
+
+  <div class="controls">
+    <button class="call" id="call" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      <span id="callWord">Start lesson</span>
+    </button>
+    <form id="typeForm">
+      <input id="typed" placeholder="You can also type during the lesson" autocomplete="off">
+      <button class="btn solid" type="button" id="sendBtn">Send</button>
+    </form>
+  </div>
+</div>
+
+<dialog id="setup">
+  <form method="dialog" class="dlg">
+    <h2>Setup (one time)</h2>
+    <ol>
+      <li>Sign up for free at <a href="https://elevenlabs.io/app/agents" target="_blank" rel="noopener">elevenlabs.io</a>, open <b>Agents</b> and create a new agent (if it only offers templates, pick a simple one like <b>Voice Reading Companion</b> and replace its text). Name it "Talking Teacher".</li>
+      <li>In <b>First message</b>, paste:
+        <div class="copybox"><textarea readonly id="firstMsg">Hi! I'm Ms. Rivera, your teacher. What would you like to learn about today?</textarea><button class="btn" type="button" data-copy="firstMsg">Copy</button></div>
+      </li>
+      <li>In <b>System prompt</b>, paste:
+        <div class="copybox"><textarea readonly id="sysPrompt">You are Ms. Rivera, a warm, lively teacher in a relaxed one-on-one voice lesson. Talk like a real person: short natural sentences, contractions, a little humor, and react to what the student says ("oh, good question!"). Keep each turn short, about two to four sentences, then hand the conversation back, often with a small question to check they understood. If the student is wrong, encourage them and give a hint instead of the answer. If the student interrupts, stop and respond to what they said.
+
+The student can see a whiteboard next to you. Whatever you explain gets sketched on it automatically: a title, key words, formulas, steps or a simple drawing. You can refer to it naturally ("take a look at the board"), but describe things in words too.</textarea><button class="btn" type="button" data-copy="sysPrompt">Copy</button></div>
+      </li>
+      <li>Under <b>LLM</b>, choose a <b>Claude</b> model (the newest Claude Sonnet is a good balance of smart and fast). Under <b>Voice</b>, pick any voice you like the sound of.</li>
+      <li>Click <b>Save</b> / <b>Publish</b>. You can press <b>Test AI agent</b> on that page to hear the voice right away.</li>
+      <li>Copy the <b>Agent ID</b> (it starts with <code>agent_</code>, shown near the agent's name or under the Widget tab) and paste it here:
+        <label for="agentId" style="margin-top:6px">Agent ID<input id="agentId" placeholder="agent_..." autocomplete="off"></label>
+      </li>
+      <li>For the whiteboard, paste your <b>Anthropic API key</b> here. The app uses it to sketch what the teacher is explaining. It stays on this laptop only.
+        <label for="anthropicKey" style="margin-top:6px">Anthropic API key<input id="anthropicKey" type="password" placeholder="sk-ant-..." autocomplete="off"></label>
+      </li>
+      <li>Planner speed: the whiteboard asks Claude what to draw after each teacher turn. <b>Smarter</b> (Sonnet 5.5) plans best; <b>Faster</b> (Haiku 5.5) starts writing sooner.
+        <label for="plannerModel" style="margin-top:6px">Whiteboard planner<select id="plannerModel"><option value="claude-sonnet-5-5">Smarter (Sonnet 5.5)</option><option value="claude-haiku-5-5">Faster (Haiku 5.5)</option></select></label>
+      </li>
+      <li>Teaching-style hints: during the lesson the page tells the teacher (as a message in this session only) to introduce an example, explain one step at a time, and what is on the board. <b>Your agent's saved settings are never changed</b>, and this cannot slow or pause a voice that is already speaking; it only shapes what the teacher says next.
+        <label for="teachHints" style="margin-top:6px">Teaching hints<select id="teachHints"><option value="on">On</option><option value="off">Off</option></select></label>
+      </li>
+      <li>Choose how the whiteboard draws. <b>Animated</b> writes and draws step by step while the teacher talks and adds to what is already on the board. <b>Classic</b> replaces the board with a finished sketch after each turn.
+        <label for="boardStyle" style="margin-top:6px">Whiteboard style<select id="boardStyle"><option value="animated">Animated (writes as the teacher talks)</option><option value="classic">Classic (whole sketch at once)</option></select></label>
+      </li>
+    </ol>
+    <p class="small">The free plan includes about 15 minutes of talking per month. That's enough to try it out. Use headphones or speakers, either works; this one handles echo for you.</p>
+    <div style="display:flex;justify-content:flex-end"><button class="btn solid" type="button" id="saveSetup">Save</button></div>
+  </form>
+</dialog>
+
+<script type="module">
+import { Conversation } from "https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.30.0/+esm";
+/* Files opened from the computer don't remember the mic permission, so the browser asks on every request.
+   Ask once, keep that microphone open, and hand out copies of it. */
+const md = navigator.mediaDevices, realGUM = md.getUserMedia.bind(md);
+let micStream = null, micAsk = null;
+md.getUserMedia = async (constraints) => {
+  if (!constraints || !constraints.audio || constraints.video) return realGUM(constraints);
+  if (!micStream || micStream.getAudioTracks().every(t => t.readyState === "ended")){
+    micAsk = micAsk || realGUM({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      .then(s => (micStream = s)).finally(() => { micAsk = null; });
+    await micAsk;
+  }
+  return micStream.clone();
+};
+const $ = id => document.getElementById(id);
+const app = $("app"), boardEl = $("board"), captionEl = $("caption"), statusEl = $("status");
+let convo = null;
+
+try { $("agentId").value = localStorage.getItem("ttl-agent") || ""; $("anthropicKey").value = localStorage.getItem("ttl-akey") || ""; $("boardStyle").value = localStorage.getItem("ttl-board") === "classic" ? "classic" : "animated"; $("plannerModel").value = localStorage.getItem("ttl-wbmodel") === "claude-haiku-5-5" ? "claude-haiku-5-5" : "claude-sonnet-5-5"; $("teachHints").value = localStorage.getItem("ttl-hints") === "off" ? "off" : "on"; } catch(e){}
+$("setup").addEventListener("close", () => { try { localStorage.setItem("ttl-agent", $("agentId").value.trim()); localStorage.setItem("ttl-akey", $("anthropicKey").value.trim()); localStorage.setItem("ttl-board", $("boardStyle").value); localStorage.setItem("ttl-wbmodel", $("plannerModel").value); localStorage.setItem("ttl-hints", $("teachHints").value); } catch(e){} refreshBadge(); });
+$("openSetup").onclick = () => $("setup").showModal();
+$("saveSetup").onclick = () => { $("setup").close(); statusEl.textContent = $("agentId").value.trim() ? "Saved. Press Start lesson." : "Add your Agent ID in Setup to start."; };
+document.querySelectorAll("[data-copy]").forEach(b => b.onclick = async () => {
+  const t = $(b.dataset.copy); try { await navigator.clipboard.writeText(t.value); b.textContent = "Copied"; } catch(e){ t.select(); }
+  setTimeout(() => b.textContent = "Copy", 1500);
+});
+if (!$("agentId").value) $("setup").showModal();
+window.addEventListener("load", refreshBadge); // the whiteboard scripts are deferred: check them once everything has loaded
+
+function setMode(m){
+  app.dataset.mode = m;
+  $("modeWord").textContent = {idle:"Not started", connecting:"Connecting", listening:"Listening", speaking:"Talking"}[m] || m;
+}
+
+/* Whiteboard */
+const ALLOWED = new Set("h2 h3 p ul ol li b strong i em u br span div table tr td th thead tbody sub sup svg g path line polyline polygon rect circle ellipse text tspan defs marker".split(" "));
+function sanitize(html){
+  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, "text/html");
+  doc.querySelectorAll("script,style,iframe,object,embed").forEach(el => el.remove());
+  const walk = node => {
+    [...node.children].forEach(el => {
+      if (!ALLOWED.has(el.tagName.toLowerCase())){ el.replaceWith(...el.childNodes); return walk(node); }
+      [...el.attributes].forEach(a => { const n = a.name.toLowerCase();
+        if (n.startsWith("on") || n === "href" || n === "xlink:href" || n === "src" || /javascript:/i.test(a.value)) el.removeAttribute(a.name); });
+      walk(el);
+    });
+  };
+  walk(doc.body.firstChild);
+  return doc.body.firstChild.innerHTML;
+}
+function showBoard(html){
+  showSurface("classic");
+  boardEl.classList.remove("fresh"); void boardEl.offsetWidth;
+  boardEl.innerHTML = sanitize(html); boardEl.classList.add("fresh"); boardEl.scrollTop = 0;
+}
+
+/* Animated whiteboard (ai-teacher/whiteboard.js). The classic board above stays as the fallback:
+   it is used when "Classic" is chosen in Setup, when the engine fails to load, and when Claude's drawing
+   steps can't be used. Drawn content is kept when switching back and forth.
+   Every decision is reported: in the console (prefix "[Whiteboard]", also kept in window.__whiteboardLog)
+   and in the "Board:" badge at the top, so a fallback never goes unnoticed. */
+const wbHost = $("wbBoard"), badgeEl = $("boardBadge");
+let whiteboard = null, lastPlanStart = 0; // lastPlanStart: when this turn's drawing began (0 until it does; reset when the student speaks)
+let turnReq = 0, plans = new Set(), turnOpen = false, endTimer = null, earlyText = "", partsText = "", firstPlanDone = Promise.resolve();
+let toolHint = "", lastToolHtml = "", toolAt = 0, toolTimer = null;
+const boardLog = window.__whiteboardLog = [];
+function setBadge(text, level){ badgeEl.textContent = "Board: " + text; badgeEl.className = "pill" + (level ? " " + level : ""); }
+function boardEvent(kind, level, message){
+  (console[level] || console.log)("[Whiteboard] " + message);
+  boardLog.push({ at: new Date().toISOString().slice(11, 23), kind, level, message }); if (boardLog.length > 200) boardLog.shift();
+}
+function engineReady(){ return !!(window.Whiteboard && window.WhiteboardCore && window.WhiteboardHand && window.WhiteboardLayout && window.WhiteboardDiagram && window.WhiteboardFontData); }
+function useAnimatedBoard(){ return $("boardStyle").value === "animated" && engineReady(); }
+function refreshBadge(){
+  if ($("boardStyle").value === "classic") setBadge("Classic (chosen in Setup)");
+  else if (!engineReady()){ setBadge("Classic fallback: drawing engine did not load", "warn"); boardEvent("fallback", "error", "The animated whiteboard scripts did not load (whiteboard-*.js must sit next to index.html), so the classic board is used."); }
+  else setBadge("Animated");
+}
+function getWhiteboard(){
+  if (!whiteboard && engineReady()) whiteboard = new window.Whiteboard(wbHost, {
+    log: (level, message) => boardEvent("engine", level, message),
+    onNotebook: updateNotebook,
+    busy: () => app.dataset.mode === "speaking" || (turnTimer && turnTimer.speaking), // background checks wait while the voice conversation is active
+    onMoment: (m) => boardEvent("moment", "info", "Teaching moment: " + m.kind.replace("_", " ") + (m.note ? " (" + m.note + ")" : "") + (m.kind === "wait" ? ". Drawing pauses until the student answers." : ".")),
+    onRef: (r) => boardEvent("sync", r.late ? "warn" : "info", 'Reference "' + r.ref + '": ' + r.id + " was finished " + (r.finishedAfterReferenceMs <= 0 ? Math.abs(r.finishedAfterReferenceMs) + " ms before" : r.finishedAfterReferenceMs + " ms after") + " the teacher said it" + (r.late ? " (too late)." : ".")),
+    onStepStart: (step) => { if (/^(write|graph|plot|point|shape|dframe|dnode|dlink|correct)$/.test(step.op)){ turnTimer.mark("penStart", step.at); renderTiming(); } },
+    onGate: (g) => boardEvent("sync", "info", "Step " + g.op + (g.id ? " " + g.id : "") + ' (cue "' + g.cue + '") released: ' + g.reason + " after " + g.waitedMs + " ms."),
+  });
+  return whiteboard;
+}
+/* ----- Notebook controls: the student can look at any page; the teacher keeps writing on the live page ----- */
+function updateNotebook(state){
+  const n = state.pages.length, view = state.pages.find(p => p.id === state.view), live = state.pages.find(p => p.id === state.live);
+  $("pageInfo").textContent = "Page " + view.number + " of " + n + (view.id === live.id ? " (live)" : " (teacher is on page " + live.number + ")");
+  $("pagePrev").disabled = view.number <= 1; $("pageNext").disabled = view.number >= n;
+  // Update the existing buttons in place (rebuilding them would drop keyboard focus every time the teacher writes).
+  const list = $("pageList");
+  while (list.children.length > state.pages.length) list.lastChild.remove();
+  state.pages.forEach((p, i) => {
+    let b = list.children[i];
+    if (!b){ b = document.createElement("button"); b.type = "button"; list.appendChild(b); }
+    b.className = "pg" + (p.id === state.live ? " live" : "") + (p.unseen ? " unseen" : ""); b.textContent = p.number;
+    b.setAttribute("aria-label", "Page " + p.number + (p.title ? ", " + p.title : "") + (p.id === state.live ? ", where the teacher is writing" : "") + (p.unseen ? ", new writing" : ""));
+    if (p.id === state.view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+    b.onclick = () => whiteboard && whiteboard.viewPage(p.number);
+  });
+  const away = state.view !== state.live;
+  $("pageLive").hidden = !away; $("pageLive").textContent = "Return to live page (" + live.number + ")";
+}
+$("pagePrev").onclick = () => whiteboard && whiteboard.viewPrevious();
+$("pageNext").onclick = () => whiteboard && whiteboard.viewNext();
+$("pageLive").onclick = () => whiteboard && whiteboard.returnToLive();
+$("notebook").addEventListener("keydown", e => { if (!whiteboard) return; if (e.key === "ArrowLeft"){ whiteboard.viewPrevious(); e.preventDefault(); } else if (e.key === "ArrowRight"){ whiteboard.viewNext(); e.preventDefault(); } });
+function showSurface(which){ boardEl.hidden = which !== "classic"; wbHost.hidden = which !== "animated"; $("notebook").hidden = which !== "animated"; }
+/* The student spoke or typed: stop outdated drawing and stop paying for a plan nobody needs, keep what is on the board. */
+function interruptBoard(){
+  if (whiteboard) whiteboard.cancelPending();
+  abortPlans();
+  turnOpen = false; earlyText = ""; partsText = "";
+  clearTimeout(toolTimer);
+  for (const timer of planTimers) clearTimeout(timer); planTimers.clear();
+  if (useAnimatedBoard()){ boardReq++; turnReq++; clearTimeout(boardTimer); }
+}
+/* One line per turn that says how the writing kept up with the voice, from real measurements (not estimates of quality). */
+let lastSync = "";
+function reportSync(){
+  const s = whiteboard.syncStats, released = Object.entries(s.released).map(([k, v]) => k + " " + v).join(", ");
+  const line = "Sync so far: steps released by [" + (released || "none") + "]; spoken references checked " + s.refs + ", late " + s.lateRefs + (s.lateRefs ? " (worst " + s.worstLateMs + " ms)" : "") + ".";
+  if (line !== lastSync){ lastSync = line; boardEvent("sync", s.lateRefs ? "warn" : "info", line); }
+  const pen = whiteboard.pacing();
+  if (pen.steps) boardEvent("pen", pen.behind ? "warn" : "info", "Pencil so far: " + pen.steps + " steps written, took " + pen.penRatio.toFixed(2) + "x the planned time; the voice had moved on before the pencil finished in " + pen.behind + (pen.behind ? " (worst " + pen.worstWordsAhead + " words, " + pen.worstBehindMs + " ms ahead)" : "") + ".");
+}
+/* ----- Turn timing: where does the time go between "I stopped speaking" and "the teacher is heard"? ----- */
+// The timing is a diagnostic: if the engine scripts are missing or stale it must never stop the lesson from starting.
+const turnTimer = (window.WhiteboardCore && window.WhiteboardCore.TurnTimer) ? new window.WhiteboardCore.TurnTimer() : { speaking: false, vad(){}, mark(){}, audible(){}, count(){}, hint(){}, longTask(){}, ping(){}, report(){ return null; }, median(){ return null; }, turns: [], current: null }; window.__timing = turnTimer;
+const tNow = () => performance.now();
+let timingRender = null, timingLogged = new Set();
+function fmtMs(ms){ return ms === null || ms === undefined ? '<span class="na">unavailable</span>' : ms + " ms"; }
+function renderTiming(){
+  clearTimeout(timingRender);
+  timingRender = setTimeout(() => {
+    const report = turnTimer.report(); if (!report) return;
+    const rows = report.rows.filter(r => r.ms !== null || ["stopToAudible", "stopToTranscript", "transcriptToText"].includes(r.key));
+    const median = turnTimer.median("stopToAudible");
+    $("timingSummary").textContent = "Turn timing: " + (report.rows[0].ms !== null ? "heard " + report.rows[0].ms + " ms after you stopped" : "waiting for the teacher") + (median !== null ? " (typical " + median + " ms)" : "");
+    $("timingBody").innerHTML = "<table>" + rows.map(r => "<tr><td>" + r.label + (r.note ? '<br><span class="na">' + r.note + "</span>" : "") + '</td><td class="ms">' + fmtMs(r.ms) + "</td></tr>").join("") + "</table>"
+      + '<div class="verdict">' + report.verdict.text.charAt(0).toUpperCase() + report.verdict.text.slice(1) + ".</div>"
+      + '<div class="na">Whiteboard planner calls this turn: ' + report.plannerCalls + (report.plannerSkipped ? " (skipped " + report.plannerSkipped + ", nothing to draw)" : "") + " · longest page task: " + report.longestTaskMs + " ms · network ping: " + (report.pingMs === null ? "unavailable" : Math.round(report.pingMs) + " ms") + " · session hints this turn: " + report.hints + ".</div>"
+      + '<div class="na">Not reported by the SDK: ' + report.unavailable.join("; ") + ".</div>";
+    // one console line per turn, numbers only (no speech, no text, no keys)
+    const turn = turnTimer.current, key = turnTimer.turns.length + ":" + (turn && turn.marks.audible);
+    if (turn && turn.marks.audible !== undefined && !timingLogged.has(key)){ timingLogged.add(key);
+      boardEvent("timing", "info", "Turn timing: " + report.rows.filter(r => r.ms !== null).map(r => r.key + " " + r.ms + " ms").join(", ") + " | " + report.verdict.text); }
+  }, 120);
+}
+try { new PerformanceObserver(list => { for (const e of list.getEntries()){ turnTimer.longTask(e.startTime, e.duration); } }).observe({ entryTypes: ["longtask"] }); } catch(e){ /* long task timing is not available in every browser */ }
+
+/* ----- Long-session health: watches the connection, microphone signals, transcription, the agent and this page ----- */
+const health = (window.WhiteboardCore && window.WhiteboardCore.SessionHealth) ? new window.WhiteboardCore.SessionHealth() : { open(){}, close(){}, setMode(){}, vad(){}, transcript(){}, agentText(){}, audible(){}, visibility(){}, deviceChange(){}, mic(){}, jank(){}, diagnose(){ return []; }, sample(){ return {}; }, samples: [] };
+window.__health = health;
+let lessonHeard = false, unexpectedClose = false, resumeNeeded = false, shownFindings = new Map(), hintsSent = 0, hintChars = 0, sessionsStarted = 0;
+// How long the page's own main thread was blocked: a stalled page delays the audio the voice connection hands it.
+{ let last = performance.now(); setInterval(() => { const now = performance.now(), lag = Math.max(0, now - last - 250); last = now; if (lag > 120 && !document.hidden) health.jank(lag, now); }, 250); // (a background tab's timers are throttled by the browser: that is not a blocked page)
+  document.addEventListener("visibilitychange", () => { last = performance.now(); }); }
+document.addEventListener("visibilitychange", () => health.visibility(document.hidden, tNow()));
+let bannerId = null, bannerAt = 0;
+try { navigator.mediaDevices && navigator.mediaDevices.addEventListener("devicechange", () => health.deviceChange(tNow())); } catch(e){ /* not available */ }
+function renderHealth(){
+  const now = tNow(), found = health.diagnose(now), box = $("health");
+  for (const f of found) if (!shownFindings.has(f.id)){ shownFindings.set(f.id, now); boardEvent("health", f.level === "error" ? "error" : f.level === "warn" ? "warn" : "info", "Session health [" + f.layer + "]: " + f.message); }
+  for (const id of [...shownFindings.keys()]) if (!found.some(f => f.id === id)) shownFindings.delete(id); // cleared: a later recurrence is reported again
+  const top = found[0];
+  box.hidden = !top; box.className = "health" + (top ? " " + top.level : "");
+  if (top && (top.id !== bannerId || now - bannerAt > 10000)){ // rewritten only when the problem changes (or every 10 s for its counter): a live region that changes every second would be read out every second
+    bannerId = top.id; bannerAt = now;
+    $("healthText").innerHTML = '<span class="layer"></span> <span class="msg"></span>';
+    box.querySelector(".layer").textContent = top.layer + ":"; box.querySelector(".msg").textContent = top.message;
+    $("healthMore").textContent = found.length > 1 ? "Also: " + found.slice(1).map(f => f.layer + ": " + f.message).join(" ") : "";
+  }
+  if (!top) bannerId = null;
+  $("reconnect").hidden = !(unexpectedClose && !convo);
+}
+function healthSample(){
+  const wb = whiteboard, mem = performance.memory;
+  const snap = health.sample(tNow(), { dom: wb ? document.querySelectorAll("#wbBoard *").length : 0, pages: wb ? wb.pages.length : 0, queue: wb ? wb.queue.length : 0, plans: plans.size, hints: hintsSent, hintChars, heapMB: mem ? Math.round(mem.usedJSHeapSize / 1048576) : null, sessions: sessionsStarted });
+  return snap;
+}
+setInterval(() => { try { if (convo && typeof convo.getInputVolume === "function") health.mic(convo.getInputVolume(), tNow()); } catch(e){ /* the SDK has no input level on this connection: unavailable, not guessed */ } renderHealth(); }, 1000);
+setInterval(healthSample, 15000);
+$("copyDiag").onclick = async () => {
+  const report = { note: "numbers only: no speech, text or keys", takenAtSeconds: Math.round((tNow() - (health.startedAt || 0)) / 1000), findings: health.diagnose(tNow()).map(f => ({ id: f.id, layer: f.layer })), samples: health.samples, timing: turnTimer.turns.map(t => turnTimer.report(t) && Object.fromEntries(turnTimer.report(t).rows.map(r => [r.key, r.ms]))) };
+  try { await navigator.clipboard.writeText(JSON.stringify(report)); $("copyDiag").textContent = "Copied"; } catch(e){ $("copyDiag").textContent = "Could not copy (see the console)"; console.log("[Whiteboard] diagnostics", JSON.stringify(report)); }
+  setTimeout(() => { $("copyDiag").textContent = "Copy diagnostics (numbers only)"; }, 2500);
+};
+/* After a connection problem the lesson continues in a NEW ElevenLabs session, which does not remember the old one. The board,
+   the notebook and the transcript are kept here, and a short summary is sent to the new session; it is told plainly that this is
+   all it knows. Nothing is reconnected silently: the student presses Reconnect. */
+function resumeNote(){
+  const wb = whiteboard, status = wb ? window.WhiteboardCore.boardStatusNote(wb.notebook(), wb.pacing()) : "";
+  const said = transcript.slice(-3).map(m => (m.role === "teacher" ? "Teacher: " : "Student: ") + m.text.slice(-160)).join(" | ");
+  return ("This lesson was interrupted by a connection problem and continues in a new session, so you do not remember it. Only this summary is known. " + status + (said ? " Last things said: " + said : "") + " Continue naturally from here; do not repeat what is already on the board and do not pretend to remember anything not listed.").slice(0, 900);
+}
+$("reconnect").onclick = () => { if (!convo && !starting){ connType = "websocket"; problems = []; resumeNeeded = true; start(); } };
+
+/* Session-only messages to the agent's LLM (contextual updates). They never edit the agent's saved configuration, never
+   interrupt it, and cannot slow or pause speech that is already playing: they only shape what it says next. */
+function hintsOn(){ return $("teachHints").value === "on" && convo && typeof convo.sendContextualUpdate === "function"; }
+function sendHint(text, what){ if (!hintsOn()) return false; try { turnTimer.hint(what, tNow()); hintsSent++; hintChars += text.length; convo.sendContextualUpdate(text); boardEvent("hint", "info", "Told the agent (this session only): " + what); return true; } catch (error){ boardEvent("hint", "warn", "Could not send a hint to the agent: " + (error && error.message)); return false; } }
+let statusTimer = null;
+/* Every context update stays in the agent's prompt for the rest of the lesson, so the board status is sent only when it
+   changed, never while the student is talking, and at most once every 20 seconds: a prompt that keeps growing slows the agent's replies. */
+let lastStatusText = "", lastStatusAt = -Infinity, statusCount = 0;
+function sendBoardStatus(){ // once the pencil has finished, tell the agent what is written so the next turn builds on it
+  if (!hintsOn() || !whiteboard) return;
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(async () => {
+    const wb = whiteboard; if (!wb) return; await wb.idle();
+    const text = window.WhiteboardCore.boardStatusNote(wb.notebook(), wb.pacing());
+    if (text === lastStatusText || tNow() - lastStatusAt < 90000 || statusCount >= 8 || turnTimer.speaking) return; // every update stays in the agent's prompt for the whole lesson: few, short, rare
+    if (sendHint(text, "board status")){ statusCount++; lastStatusText = text; lastStatusAt = tNow(); }
+  }, 400);
+}
+function abortPlans(){ for (const c of plans) c.abort(); plans.clear(); }
+function htmlToText(html){ // what the agent's own board HTML says, without drawing it
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("script,style").forEach(el => el.remove());
+  doc.querySelectorAll("p,li,h1,h2,h3,div,tr,br,text,tspan").forEach(el => el.append(" | "));
+  return doc.body.textContent.replace(/\s+/g, " ").trim();
+}
+
+/* Auto whiteboard: after each teacher turn, Claude sketches what was just explained. */
+const transcript = []; let toolUsedThisTurn = false, boardTimer = null, boardReq = 0, lastAgentText = "";
+function noteMessage(role, text){
+  const last = transcript[transcript.length - 1];
+  if (last && last.role === role){ if (role === "teacher" && text.startsWith(last.text.slice(0, 20))) last.text = text; else last.text += " " + text; }
+  else transcript.push({ role, text });
+  if (transcript.length > 12) transcript.shift();
+}
+const planTimers = new Set(); let lastPlannedText = "";
+function scheduleBoard(options){
+  // Start at once (a few ms only merges duplicate events): every ms here is a ms between the voice and the first stroke.
+  // An early plan and its continuation each keep their own timer, so a continuation arriving within the same few ms
+  // can never cancel the plan it continues.
+  if (options){
+    const timer = setTimeout(() => { planTimers.delete(timer); if (useAnimatedBoard()) drawAnimatedBoard(options); else drawBoard(); }, 30);
+    planTimers.add(timer); return;
+  }
+  clearTimeout(boardTimer);
+  boardTimer = setTimeout(() => (useAnimatedBoard() ? drawAnimatedBoard({}) : drawBoard()), 30);
+}
+function fallbackToClassic(reason){
+  boardEvent("fallback", "warn", "Classic fallback: " + reason);
+  setBadge("Classic fallback: " + reason, "warn");
+  statusEl.textContent = "Whiteboard: classic fallback (" + reason + ")";
+  if (toolHint && lastToolHtml) showBoard(lastToolHtml); // the agent's own board, as it asked for
+  else drawBoard();
+}
+/* A separate Claude call streams drawing steps (one JSON object per line, each checked against a strict schema in
+   whiteboard-core.js). Each step is handed to the pen as soon as it arrives, so writing starts after Claude's first
+   line, not its last. Steps carry a "cue" (the teacher's words they illustrate) and wait for it, so the board shows
+   what is being said now, not what comes later.
+   options.text: the teacher's words so far (streamed text); options.handled: the start of this turn that an earlier
+   plan already covered, when this plan only continues it. */
+async function drawAnimatedBoard(options){
+  const key = $("anthropicKey").value.trim();
+  if (!key){ boardEvent("planner", "warn", "No Anthropic API key in Setup, so the whiteboard cannot draw."); setBadge("no Anthropic key", "warn"); return; }
+  const board = getWhiteboard(), my = ++boardReq, myTurn = turnReq;
+  if (!options.handled) abortPlans(); // a new turn replaces the old plan; a continuation runs beside its first part
+  const abort = new AbortController(); plans.add(abort);
+  let timedOut = false; const plannerTimeout = setTimeout(() => { timedOut = true; abort.abort(); }, 45000); // a request that never answers must not hold the plan (and later plans of the turn) for ever
+  lastPlanStart = Date.now();
+  const t0 = performance.now(); let firstStepMs = null, steps = 0;
+  turnTimer.mark("plannerRequest", t0); turnTimer.count("plannerCalls");
+  const stale = () => myTurn !== turnReq, previous = firstPlanDone;
+  let momentSeen = null;
+  const early = !!options.text && !options.handled; // this plan has only the first sentence of the turn
+  const deliver = (ops) => {
+    // A "wait" decided from the first sentence alone (a rhetorical "Where will it land?") must not stop the rest of the turn.
+    if (early && ops.some(o => o.op === "moment" && o.kind === "wait")){ boardEvent("moment", "info", "Ignoring a wait decided from the first sentence only; the rest of the turn is planned separately."); ops = ops.filter(o => !(o.op === "moment" && o.kind === "wait")); }
+    const drawing = ops.filter(o => o.op !== "moment"); ops.forEach(o => { if (o.op === "moment") momentSeen = o.kind; });
+    if (drawing.length) turnTimer.mark("plannerFirstOp", performance.now());
+    if (drawing.length && firstStepMs === null){ firstStepMs = Math.round(performance.now() - t0); showSurface("animated"); setBadge("Animated · drawing", "live"); boardEvent("first-step", "info", "First drawing step arrived after " + firstStepMs + " ms; the pen starts now."); }
+    steps += drawing.length; board.enqueue(ops);
+  };
+  let resolveDone; const done = new Promise(r => { resolveDone = r; });
+  if (!options.handled) firstPlanDone = done;
+  // A continuation's steps wait for the first part of the turn, then flow as they arrive (speaking order, no waiting for the end of the stream).
+  const ordered = options.handled ? window.WhiteboardCore.createOrderedDelivery(previous, deliver, stale) : null;
+  const turns = options.text ? [...transcript.filter((m, i) => !(i === transcript.length - 1 && m.role === "teacher")), { role: "teacher", text: options.text }] : transcript;
+  setBadge("Animated · planning", "live");
+  boardEvent("planning", "info", "Asking Claude what to draw (" + transcript.length + " turns, " + board.summary().length + " items on " + board.state().pages.length + " page(s)" + (options.handled ? ", continuing a turn already started" : "") + (toolHint ? ", plus the agent's show_on_board request" : "") + ").");
+  try {
+    const result = await window.WhiteboardCore.planBoardStream({
+      apiKey: key, turns, notebook: board.notebook(), context: board.context(), hint: toolHint, handled: options.handled, partial: !!options.text && !options.handled, signal: abort.signal, model: $("plannerModel").value, pen: board.pacing(),
+      onOps: (ops) => { if (stale()) return; if (ordered) ordered.push(ops); else deliver(ops); },
+    });
+    if (ordered) await ordered.whenReleased(); // anything held back for the first part is delivered now
+    if (stale()) return;
+    if (result.errors.length) boardEvent("planner", "warn", result.errors.length + " drawing step(s) were rejected: " + result.errors.slice(0, 3).join("; "));
+    if (steps === 0){
+      if (!options.handled && momentSeen && !toolHint){ // the planner chose, on purpose, not to draw: that is teaching, not a failure
+        setBadge(momentSeen === "wait" ? "Animated · waiting for the student" : "Animated · speaking only"); boardEvent("nothing", "info", "The teacher explains without drawing this turn (" + momentSeen.replace("_", " ") + ").");
+      } else if (!options.handled){
+        if (toolHint || result.errors.length) fallbackToClassic(toolHint ? "Claude drew nothing for the agent's request" : "Claude's drawing steps could not be used");
+        else { setBadge("Animated · nothing to draw"); boardEvent("nothing", "info", "Claude chose to draw nothing for this turn."); }
+      }
+      return;
+    }
+    setBadge("Animated · " + steps + " steps", "live");
+    boardEvent("animated", "info", "Drawing " + steps + " step(s) by hand; plan complete after " + Math.round(performance.now() - t0) + " ms" + (result.usage && result.usage.output_tokens ? " (" + result.usage.output_tokens + " output tokens)" : "") + ".");
+  } catch(e){
+    if (e && e.name === "AbortError" && timedOut){ boardEvent("planner", "warn", "The planner did not answer within 45 s and was stopped; the lesson continues without this drawing."); return; }
+    if (e && e.name === "AbortError"){ boardEvent("planner", "info", "Plan cancelled (the student spoke or a newer turn started)."); return; }
+    if (e && e.status === 401){ statusEl.textContent = "Whiteboard: the Anthropic key didn't work. Check it in Setup."; setBadge("Anthropic key rejected", "warn"); boardEvent("planner", "error", "Anthropic rejected the API key (401)."); return; }
+    boardEvent("planner", "error", "Planner failed: " + (e && (e.status ? "HTTP " + e.status : e.message)));
+    if (ordered) await ordered.whenReleased(); // steps that did arrive before the error are still drawn
+    if (stale()) return;
+    if (steps > 0 || options.handled){ boardEvent("planner", "warn", "The plan stopped after " + steps + " step(s); keeping what was drawn."); return; }
+    fallbackToClassic("planner error " + (e && (e.status || e.message)));
+  } finally { clearTimeout(plannerTimeout); plans.delete(abort); resolveDone(); }
+}
+async function drawBoard(){
+  const key = $("anthropicKey").value.trim();
+  if (!key || toolUsedThisTurn) return;
+  const my = ++boardReq;
+  const convoText = transcript.map(m => (m.role === "teacher" ? "Teacher: " : "Student: ") + m.text).join("\n");
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true", "anthropic-beta": "server-side-fallback-2026-07-01" },
+      body: JSON.stringify({
+        model: "claude-opus-5-5", max_tokens: 4000, output_config: { effort: "low" }, fallbacks: "default",
+        system: `You draw the whiteboard for a live voice lesson. Given the conversation, decide what the board should show right now to support the teacher's latest turn.
+Reply with ONLY the board content as simple HTML: an <h2> title, <p>, <ul><li>, <b>, <span class="hl"> for a highlight, <table>, and inline <svg> drawings. For SVG use viewBox="0 0 600 340", stroke="currentColor", fill="none" for shapes, and <text> with font-size between 18 and 28. Keep it short and simple, like a teacher's quick sketch: a title plus a drawing, a formula, a few key words or numbered steps.
+If the latest turn is small talk or nothing new is being explained, reply with exactly KEEP.`,
+        messages: [{ role: "user", content: "Conversation so far:\n" + convoText }]
+      })
+    });
+    if (!res.ok){ if (res.status === 401) statusEl.textContent = "Whiteboard: the Anthropic key didn't work. Check it in Setup."; boardEvent("classic", "error", "Classic board request failed: HTTP " + res.status); return; }
+    const data = await res.json();
+    if (my !== boardReq || data.stop_reason === "refusal") return;
+    const html = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").replace(/^\s*```(?:html)?|```\s*$/g, "").trim();
+    if (html && html !== "KEEP"){ boardEvent("classic", "info", "Classic board drew the whole sketch at once."); showBoard(html); }
+  } catch(e){ boardEvent("classic", "error", "Classic board failed: " + (e && e.message)); /* the lesson keeps going without the board */ }
+}
+
+/* Lesson */
+let connType = "websocket", heardAgent = false, lastProblem = "", problems = [];
+function describe(msg, ctx){
+  const bits = [msg];
+  if (ctx && typeof ctx === "object"){ ["errorType","code","debugMessage","details","closeCode","closeReason","message"].forEach(k => { if (ctx[k]) bits.push(k + ": " + (typeof ctx[k] === "object" ? JSON.stringify(ctx[k]) : ctx[k])); }); }
+  return bits.join(" · ");
+}
+let starting = false; // a session is being opened: a second click or retry must not open another one
+async function start(isRetry){
+  const agentId = $("agentId").value.trim();
+  if (!agentId){ $("setup").showModal(); return; }
+  if (starting || convo) return;
+  starting = true; unexpectedClose = false; renderHealth();
+  setMode("connecting"); if (!isRetry) statusEl.textContent = ""; heardAgent = false; lastProblem = "";
+  try {
+    convo = await Conversation.startSession({
+      agentId,
+      connectionType: connType,
+      clientTools: {
+        // The agent's own board tool. In Animated mode its finished HTML is NOT painted (that would show a completed
+        // board at once); what it asks for is passed to the animated board, which draws it by hand. If that cannot
+        // be done, the classic fallback shows the agent's HTML.
+        show_on_board: async ({ content }) => {
+          if (!content) return "The board now shows it.";
+          lastToolHtml = content; toolAt = Date.now();
+          if (!useAnimatedBoard()){ toolUsedThisTurn = true; boardEvent("classic", "info", "The agent's show_on_board tool drew the classic board (" + content.length + " characters of HTML)."); showBoard(content); }
+          else if (lastPlanStart > 0) boardEvent("tool", "info", "The agent's show_on_board tool was called after this turn's drawing had already started; the teacher's words keep driving the drawing.");
+          else {
+            toolHint = htmlToText(content);
+            boardEvent("tool", "info", "The agent's show_on_board tool was called (" + content.length + " characters of HTML). Not painting its finished HTML: the animated board will draw it by hand.");
+            clearTimeout(toolTimer);
+            toolTimer = setTimeout(() => { if (lastPlanStart < toolAt) scheduleBoard(); }, 2500); // the teacher's own words normally start the drawing; this covers a silent tool call
+          }
+          return "The board now shows it.";
+        }
+      },
+      onConnect: () => { starting = false; health.open(tNow()); sessionsStarted++; lastStatusAt = -Infinity; statusCount = 0; lastStatusText = ""; unexpectedClose = false; if (resumeNeeded){ setTimeout(() => { try { if (!convo) return; convo.sendContextualUpdate(resumeNote()); resumeNeeded = false; hintsSent++; boardEvent("health", "info", "Reconnected: the board and transcript were kept; a short summary was sent to the new session (it does not remember the old one)."); } catch(e){} }, 500); } $("call").classList.add("live"); $("callWord").textContent = "End lesson"; setMode("listening"); setTimeout(() => sendHint(window.WhiteboardCore.TEACHING_STYLE_NOTE, "teaching style (one step at a time, say it before writing it)"), 300); },
+      onDisconnect: (d) => {
+        starting = false; health.close(tNow(), (d && (d.message || d.reason)) || "closed"); if (d && d.reason !== "user" && (heardAgent || lessonHeard)) unexpectedClose = true;
+        if (!lastProblem && d && (d.reason === "error" || (!heardAgent && d.reason === "agent")))
+          lastProblem = "Problem (" + connType + "): " + describe(d.message || ("closed by " + d.reason), { ...(d.context || {}), closeCode: d.closeCode, closeReason: d.closeReason });
+        if (lastProblem){ problems.push(lastProblem); statusEl.textContent = problems.join("  ||  "); }
+        const retry = !heardAgent && !lessonHeard && !!lastProblem && connType === "websocket"; // only a lesson that has never connected falls back to another connection type; a lesson in progress is never reconnected silently
+        convo = null; $("call").classList.remove("live"); $("callWord").textContent = "Start lesson"; setMode("idle"); interruptBoard(); renderHealth();
+        if (retry){ connType = "webrtc"; statusEl.textContent += " · Trying another way to connect..."; setTimeout(() => start(true), 600); }
+      },
+      onModeChange: ({ mode }) => {
+        health.setMode(mode, tNow());
+        const wasSpeaking = app.dataset.mode === "speaking";
+        if (mode === "speaking"){
+          clearTimeout(endTimer); // a short gap between sentences is not the end of the turn
+          if (!wasSpeaking){
+            turnTimer.audible(tNow(), "speaking mode"); health.audible(tNow()); renderTiming(); // (an exact playback event, when the SDK sends one, replaces this)
+            const wb = getWhiteboard();
+            // Text that arrived long after its voice had ended (and no voice ever started for it) belongs to a finished turn.
+            if (wb && turnOpen && wb.clock.startedAt == null && wb.clock.messageAt != null && wb.now() - wb.clock.messageAt > 4000) turnOpen = false;
+            if (wb){ if (!turnOpen){ wb.beginTurn(); turnOpen = true; } wb.speechStart(); }
+          }
+        } else if (wasSpeaking){
+          clearTimeout(endTimer);
+          endTimer = setTimeout(() => { if (whiteboard){ whiteboard.speechEnd(); reportSync(); sendBoardStatus(); } turnOpen = false; }, 700);
+        }
+        setMode(mode === "speaking" ? "speaking" : "listening");
+      },
+      // The agent was cut off by the student: stop drawing whatever was still queued.
+      onInterruption: () => { interruptBoard(); turnTimer.mark("interrupted", tNow()); },
+      // Voice activity (the SDK's own score for whether the student is speaking), used only to time the turn.
+      onVadScore: ({ vadScore }) => { turnTimer.vad(vadScore, tNow()); health.vad(vadScore, tNow()); },
+      onPing: (ping) => { turnTimer.ping(ping && ping.ping_ms); },
+      onAudio: () => { turnTimer.mark("audioChunk", tNow()); },
+      onAudioAlignment: () => { turnTimer.mark("audioChunk", tNow()); },
+      // Fires as each piece of the teacher's voice actually plays, if the agent sends character timing.
+      // When it does, drawing steps wait for the words they belong to. When it doesn't, drawing is paced by time.
+      // WebSocket connections only: ElevenLabs does not send audio events (and so no alignment) over WebRTC.
+      onAudioAlignmentPlayback: (e) => { turnTimer.audible(tNow(), "audio playback event"); health.audible(tNow()); renderTiming(); const a = e && e.alignment, chars = a && a.chars; if (whiteboard && Array.isArray(chars)) whiteboard.speechProgress(chars.join(""), a.char_start_times_ms, e.event_id); },
+      // The agent's reply as it is being written, before the voice has finished it. Only sent if "agent_chat_response_part"
+      // is enabled in the agent's client events. The first complete sentence is enough to start the pen early.
+      onAgentChatResponsePart: (part) => {
+        if (!part || !useAnimatedBoard()) return;
+        if (part.type === "start"){ partsText = ""; earlyText = ""; }
+        if (part.text){ partsText += part.text; turnTimer.mark("agentText", tNow(), "streamed text"); }
+        const wb = getWhiteboard(); if (wb && turnOpen) wb.setTurnText(partsText);
+        const sentenceEnd = Math.max(partsText.lastIndexOf(". "), partsText.lastIndexOf("? "), partsText.lastIndexOf("! "));
+        if (!earlyText && sentenceEnd >= 25){ // long enough to be real content, not "Sure." or "Great question!"
+          earlyText = partsText.slice(0, sentenceEnd + 1);
+          if (!turnOpen && wb){ wb.beginTurn(earlyText); turnOpen = true; }
+          boardEvent("turn", "info", "Streaming text: planning from the first sentence (" + earlyText.length + " characters) before the reply is complete.");
+          scheduleBoard({ text: earlyText });
+        }
+      },
+      onMessage: (m) => {
+        const text = m?.message ?? ""; if (!text) return;
+        const fromYou = m.source === "user" || m.role === "user";
+        captionEl.classList.toggle("you", fromYou);
+        captionEl.textContent = fromYou ? "You: " + text : text;
+        if (!fromYou) heardAgent = lessonHeard = true;
+        turnTimer.mark(fromYou ? "transcript" : "agentText", tNow(), fromYou ? undefined : "the final message"); renderTiming();
+        if (fromYou) health.transcript(tNow()); else health.agentText(tNow());
+        if (fromYou){ lastPlannedText = ""; interruptBoard(); toolUsedThisTurn = false; toolHint = ""; lastToolHtml = ""; lastPlanStart = 0; noteMessage("student", text); }
+        else {
+          const wb = getWhiteboard();
+          if (wb){ if (!turnOpen){ wb.beginTurn(text); turnOpen = true; } else wb.setTurnText(text); } // the text can arrive before or after the voice starts
+          noteMessage("teacher", text);
+          if (earlyText && text.startsWith(earlyText.slice(0, 20))){ // an early plan already covers the start of this turn: plan only what is left
+            const rest = text.slice(earlyText.length).trim();
+            boardEvent("turn", "info", "Teacher turn complete (" + text.length + " characters); " + (rest.length >= 25 ? "planning the rest." : "the early plan covers it."));
+            if (rest.length >= 25 && useAnimatedBoard()) scheduleBoard({ handled: earlyText });
+            earlyText = ""; partsText = "";
+          } else if (text === lastPlannedText){
+            boardEvent("turn", "info", "The same teacher message arrived again; not planning it twice.");
+          } else if (useAnimatedBoard() && !toolHint && window.WhiteboardCore.worthPlanning && !window.WhiteboardCore.worthPlanning(text)){
+            turnTimer.count("plannerSkipped"); lastPlannedText = text;
+            boardEvent("turn", "info", "Short teacher reply (" + text.length + " characters): nothing to draw, so no planner call.");
+          } else {
+            lastPlannedText = text;
+            boardEvent("turn", "info", "Teacher turn received (" + text.length + " characters). " + (useAnimatedBoard() ? "Planning the drawing." : "Classic board."));
+            scheduleBoard();
+          }
+        }
+      },
+      onError: (msg, ctx) => { lastProblem = "Problem (" + connType + "): " + describe(typeof msg === "string" ? msg : (msg?.message || String(msg)), ctx); statusEl.textContent = problems.concat(lastProblem).join("  ||  "); console.error(lastProblem, ctx); }
+    });
+  } catch(e){
+    starting = false;
+    setMode("idle");
+    statusEl.textContent = /permission|notallowed/i.test(String(e?.name || e?.message || e))
+      ? "Allow the microphone (click the icon in the address bar) and try again."
+      : "Couldn't start: " + (e?.message || e) + ". Check the Agent ID in Setup.";
+  }
+}
+$("call").onclick = async () => { if (convo){ await convo.endSession(); } else if (!starting){ connType = "websocket"; problems = []; resumeNeeded = unexpectedClose || resumeNeeded; start(); } }; // (starting a new lesson session after a drop also sends the summary)
+$("typed").addEventListener("input", () => { if (convo) convo.sendUserActivity(); });
+function sendTyped(){ const q = $("typed").value.trim(); if (!q) return;
+  if (!convo){ statusEl.textContent = "Press Start lesson first."; return; }
+  lastPlannedText = ""; turnTimer.mark("typed", tNow()); convo.sendUserMessage(q); $("typed").value = ""; interruptBoard(); toolUsedThisTurn = false; toolHint = ""; lastToolHtml = ""; lastPlanStart = 0; noteMessage("student", q);
+  captionEl.classList.add("you"); captionEl.textContent = "You: " + q;
+}
+$("sendBtn").onclick = sendTyped;
+$("typed").addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); sendTyped(); } });
+$("typeForm").addEventListener("submit", e => e.preventDefault());
+</script>
+</body>
+</html>
