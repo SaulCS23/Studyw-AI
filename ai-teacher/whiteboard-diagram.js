@@ -347,5 +347,68 @@
     return best ? { x: best.x, y: best.y, ok: false } : { x: anchor[0] + gap, y: anchor[1] - h - gap, ok: false };
   }
 
-  return { LINK_LABEL_WIDTH, LINK_LABEL_SIZE, layoutDiagram, nodeSize, placeLabel, segmentHitsRect, polylineHitsRect, overlaps, inflate, inside, borderPoint, LABEL_SIZE, TITLE_SIZE, PAD, CLEAR, DEFAULTS };
+  /* ---------- Placing a label by its REAL strokes ---------- */
+
+  /** Smallest distance between segment ab and segment cd. */
+  function segmentDistance(a, b, c, d) {
+    const cross = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    const d1 = cross(a, b, c), d2 = cross(a, b, d), d3 = cross(c, d, a), d4 = cross(c, d, b);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return 0; // they cross
+    const toSegment = (p, s, e) => { const dx = e[0] - s[0], dy = e[1] - s[1], len = dx * dx + dy * dy, t = len ? Math.max(0, Math.min(1, ((p[0] - s[0]) * dx + (p[1] - s[1]) * dy) / len)) : 0; return Math.hypot(p[0] - (s[0] + t * dx), p[1] - (s[1] + t * dy)); };
+    return Math.min(toSegment(a, c, d), toSegment(b, c, d), toSegment(c, a, b), toSegment(d, a, b));
+  }
+  const boundsOf = (poly) => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const [x, y] of poly) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } return { x0, y0, x1, y1 }; };
+  /** Smallest distance between two sets of polylines (strokes), or `limit` if they are at least that far apart. */
+  function inkGap(strokesA, strokesB, limit) {
+    let best = limit;
+    // Long polylines (a plotted curve) are cut into short pieces with their own boxes, so a label far from most of a curve is not compared with all of it.
+    const pieces = (strokes) => { const out = []; for (const poly of strokes) { if (poly.length <= 10) { out.push({ poly, from: 0, to: Math.max(1, poly.length - 1), box: boundsOf(poly) }); continue; } for (let at = 0; at < poly.length - 1; at += 8) { const to = Math.min(poly.length - 1, at + 8); out.push({ poly, from: at, to, box: boundsOf(poly.slice(at, to + 1)) }); } } return out; };
+    const piecesA = pieces(strokesA), piecesB = pieces(strokesB);
+    for (const A of piecesA) for (const B of piecesB) {
+      const a = A.box, b = B.box;
+      if (a.x0 - b.x1 > best || b.x0 - a.x1 > best || a.y0 - b.y1 > best || b.y0 - a.y1 > best) continue;
+      for (let i = A.from; i < Math.max(A.from + 1, A.to); i++) for (let j = B.from; j < Math.max(B.from + 1, B.to); j++) {
+        const g = segmentDistance(A.poly[i], A.poly[Math.min(i + 1, A.poly.length - 1)], B.poly[j], B.poly[Math.min(j + 1, B.poly.length - 1)]);
+        if (g < best) { best = g; if (best <= 0) return 0; }
+      }
+    }
+    return best;
+  }
+  /**
+   * Find a place for a label written as `label.strokes` (polylines with the label's top-left corner at 0,0, size w x h)
+   * where its letters stay at least `pad` units from every obstacle stroke (axes, numbers, curves, other labels). The
+   * obstacles are polylines, not boxes. `regions` are the areas the label may sit in, best first (each box must lie
+   * wholly inside one). Candidates are the eight directions around the anchor at growing distances, then a scan of
+   * every region, nearest the anchor first. Returns { x, y, ok, region } (ok false: nothing was completely clear, so
+   * the least bad place is returned).
+   */
+  function placeInk(anchor, label, obstacles, regions, options) {
+    const o = options || {}, pad = o.pad == null ? 9 : o.pad, gap = o.gap == null ? 12 : o.gap, w = label.w, h = label.h;
+    const polys = obstacles.ink || [], rects = obstacles.rects || [];
+    const penalty = (index) => index * 36;
+    const candidates = [];
+    regions.forEach((region, index) => {
+      const add = (x, y) => { const box = { x, y, w, h }; if (inside(box, region, 0)) candidates.push({ x, y, index, cost: Math.hypot(x + w / 2 - anchor[0], y + h / 2 - anchor[1]) + penalty(index) }); };
+      const directions = [[1, -1], [1, 1], [-1, -1], [-1, 1], [1, 0], [-1, 0], [0, -1], [0, 1]];
+      for (const ring of [1, 1.8, 2.8, 4, 5.5]) for (const [ux, uy] of directions) add(anchor[0] + (ux > 0 ? gap * ring : ux < 0 ? -gap * ring - w : -w / 2), anchor[1] + (uy > 0 ? gap * ring : uy < 0 ? -gap * ring - h : -h / 2));
+      for (let y = region.y; y + h <= region.y + region.h + 0.5; y += 10) for (let x = region.x; x + w <= region.x + region.w + 0.5; x += 10) add(x, y);
+    });
+    candidates.sort((p, q) => p.cost - q.cost);
+    const clearance = (c) => {
+      const moved = label.strokes.map((poly) => poly.map(([px, py]) => [px + c.x, py + c.y]));
+      let worst = inkGap(moved, polys, pad);
+      const box = inflate({ x: c.x, y: c.y, w, h }, pad / 2);
+      for (const r of rects) if (overlaps(box, r)) worst = Math.min(worst, 0);
+      return worst;
+    };
+    let best = null;
+    for (let i = 0; i < Math.min(candidates.length, 1500); i++) {
+      const c = candidates[i], g = clearance(c);
+      if (g >= pad) return { x: c.x, y: c.y, ok: true, region: c.index };
+      if (!best || g > best.gap) best = { x: c.x, y: c.y, gap: g, region: c.index };
+    }
+    return best ? { x: best.x, y: best.y, ok: false, gap: best.gap, region: best.region, inRegion: true } : { x: anchor[0] + gap, y: anchor[1] - h - gap, ok: false, gap: -1, region: 0, inRegion: false };
+  }
+
+  return { segmentDistance, inkGap, placeInk, LINK_LABEL_WIDTH, LINK_LABEL_SIZE, layoutDiagram, nodeSize, placeLabel, segmentHitsRect, polylineHitsRect, overlaps, inflate, inside, borderPoint, LABEL_SIZE, TITLE_SIZE, PAD, CLEAR, DEFAULTS };
 });

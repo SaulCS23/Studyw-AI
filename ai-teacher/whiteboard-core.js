@@ -714,6 +714,116 @@
     return /\?\s*["')]*$/.test(sentences[sentences.length - 1] || "");
   }
 
+  /* ---------- Conversation latency: one timeline per turn (pure: time is passed in) ---------- */
+
+  /**
+   * Records when each step of a conversational turn happened (monotonic ms, e.g. performance.now()) and turns them into
+   * the numbers a person needs to see where the time goes. Only events the SDK really reports are marked; anything it
+   * does not report stays unavailable and is shown as unavailable, never estimated.
+   *
+   * Marks: studentStart / studentStop (from voice activity scores), typed (a typed message was sent), transcript (the
+   * final transcription arrived), agentText (first teacher text), audioChunk (first teacher audio data received,
+   * WebSocket only), audible (first teacher audio actually playing), plannerRequest, plannerFirstOp, penStart.
+   */
+  class TurnTimer {
+    constructor(options) {
+      const o = options || {};
+      this.vadThreshold = o.vadThreshold == null ? 0.5 : o.vadThreshold;
+      this.vadHoldMs = o.vadHoldMs == null ? 400 : o.vadHoldMs; // silence this long means the student stopped
+      this.turns = []; this.current = null; this.speaking = false; this.speakingSince = null; this.latched = false; this.lastHighAt = null; this.pingMs = null;
+    }
+    begin(kind, now) {
+      this.current = { kind, startedAt: now, marks: {}, detail: {}, plannerCalls: 0, plannerSkipped: 0, hints: [], longTasks: [], notes: [] };
+      this.turns.push(this.current); if (this.turns.length > 30) this.turns.shift();
+      return this.current;
+    }
+    // A turn is finished once the teacher is audible: the next sign of the student (or a new message) starts a new one.
+    finished(turn) { return !turn || turn.marks.audible !== undefined; }
+    teacherStarted(turn) { return !!turn && ["agentText", "audioChunk", "audible"].some((k) => turn.marks[k] !== undefined); }
+    /** One voice-activity score. Marks studentStart on the first high score and studentStop after enough silence. */
+    vad(score, now) {
+      this.settle(now);
+      if (score >= this.vadThreshold) {
+        if (this.latched) return; // a score that never fell (echo): ignored until it does
+        this.lastHighAt = now;
+        if (!this.speaking) {
+          this.speaking = true; this.speakingSince = now;
+          if (!this.current || this.teacherStarted(this.current) || this.current.marks.transcript !== undefined) this.begin("voice", now);
+          if (this.current.marks.studentStart === undefined) this.current.marks.studentStart = now;
+          delete this.current.marks.studentStop; // speaking again within the same turn: the stop moves
+        }
+      } else { this.latched = false; this.settle(now); }
+    }
+    /** Called on every score and mark: has the student been silent long enough to have stopped? */
+    settle(now) {
+      if (this.speaking && this.speakingSince !== null && now - this.speakingSince > 60000) { this.speaking = false; this.latched = true; if (this.current && this.current.marks.studentStop === undefined) this.current.marks.studentStop = this.lastHighAt; } // a score that never falls (echo) is not a 60 s utterance
+      if (this.speaking && this.lastHighAt !== null && now - this.lastHighAt >= this.vadHoldMs) {
+        this.speaking = false;
+        if (this.current && this.current.marks.studentStop === undefined) this.current.marks.studentStop = this.lastHighAt;
+      }
+    }
+    /** First occurrence of a named moment in the current turn. */
+    mark(name, now, detail) {
+      this.settle(now);
+      if (name === "typed") { this.begin("typed", now); this.current.marks.studentStop = now; this.current.marks.typed = now; return; }
+      // A transcript opens a new student turn unless the current turn is a student turn still waiting for its transcript.
+      if (!this.current) this.begin(name === "transcript" ? "voice" : "agent", now);
+      else if (name === "transcript" && (this.current.marks.transcript !== undefined || this.teacherStarted(this.current))) this.begin("voice", now);
+      const turn = this.current;
+      if (turn.marks[name] === undefined) { turn.marks[name] = now; if (detail) turn.detail[name] = detail; }
+    }
+    /** The teacher became audible. A playback event (exact) replaces an earlier guess from the speaking mode, once. */
+    audible(now, source) {
+      const turn = this.current;
+      if (turn && turn.marks.audible !== undefined) {
+        if (source === "audio playback event" && turn.detail.audible === "speaking mode" && now - turn.marks.audible < 3000) { turn.marks.audible = now; turn.detail.audible = source; }
+        return; // only the first audible moment of a turn counts
+      }
+      this.mark("audible", now, source);
+    }
+    count(name) { if (this.current) this.current[name] = (this.current[name] || 0) + 1; }
+    hint(kind, now) { if (this.current) this.current.hints.push({ kind, at: now }); }
+    longTask(startMs, durationMs) { if (this.current && startMs >= this.current.startedAt) this.current.longTasks.push(durationMs); }
+    ping(ms) { if (Number.isFinite(ms)) this.pingMs = ms; }
+
+    /** The rows to show for a turn: { key, label, ms | null, note }. ms is null when it cannot be measured. */
+    report(turn) {
+      const t = turn || this.current; if (!t) return null;
+      const m = t.marks, span = (from, to) => (m[from] !== undefined && m[to] !== undefined && m[to] >= m[from] ? Math.round(m[to] - m[from]) : null); // events that arrive out of order are unavailable, not negative
+      const rows = [
+        { key: "stopToAudible", label: "You stopped speaking to the first audible response", ms: span("studentStop", "audible"), note: m.studentStop === undefined ? "needs voice-activity events from the SDK (not received)" : m.audible === undefined ? "the teacher has not been heard yet" : (t.detail.audible || "") },
+        { key: "stopToTranscript", label: "You stopped speaking to the final transcript", ms: span("studentStop", "transcript"), note: "includes end-of-turn detection and speech-to-text; the SDK does not report them separately" },
+        { key: "transcriptToText", label: "Final transcript to first teacher text", ms: span("transcript", "agentText"), note: t.detail.agentText ? "from " + t.detail.agentText : "needs agent_chat_response_part or the final message" },
+        { key: "transcriptToAudioChunk", label: "Final transcript to first teacher audio received", ms: span("transcript", "audioChunk"), note: m.audioChunk === undefined ? "audio data events are WebSocket only" : "" },
+        { key: "chunkToAudible", label: "First audio received to audible", ms: span("audioChunk", "audible"), note: "browser buffering and playback" },
+        { key: "textToPlannerRequest", label: "First teacher text to whiteboard planner request", ms: span("agentText", "plannerRequest"), note: "" },
+        { key: "plannerLatency", label: "Whiteboard planner request to first drawing step", ms: span("plannerRequest", "plannerFirstOp"), note: "Anthropic, separate from the voice connection" },
+        { key: "audibleToPen", label: "First audible to pencil writing", ms: span("audible", "penStart"), note: "includes waiting for the step's cue in the teacher's words, on purpose" },
+      ];
+      return { kind: t.kind, rows, verdict: this.verdict(t), plannerCalls: t.plannerCalls, plannerSkipped: t.plannerSkipped, hints: t.hints.length, longestTaskMs: t.longTasks.length ? Math.round(Math.max(...t.longTasks)) : 0, pingMs: this.pingMs, unavailable: ["when ElevenLabs begins processing the turn", "end-of-turn detection on its own (the turn-taking timeout), apart from transcription"] };
+    }
+    /** Which measured part of stop-to-audible was the largest? Only from measured numbers; never a guess. */
+    verdict(t) {
+      const m = t.marks, parts = [];
+      const add = (label, from, to) => { if (m[from] !== undefined && m[to] !== undefined && m[to] >= m[from]) parts.push({ label, ms: Math.round(m[to] - m[from]) }); };
+      add("microphone, voice activity and end-of-turn detection, then speech-to-text (ElevenLabs turn-taking settings and transcription)", "studentStop", "transcript");
+      if (m.audioChunk !== undefined) {
+        add("the agent's LLM and voice generation (ElevenLabs agent)", "transcript", "audioChunk");
+        add("browser audio buffering and playback", "audioChunk", "audible");
+      } else add("the agent's LLM, voice generation and playback together (audio events are not available on this connection)", "transcript", "audible");
+      if (!parts.length) return { text: "not enough measured events yet", parts };
+      parts.sort((a, b) => b.ms - a.ms);
+      const total = parts.reduce((sum, p) => sum + p.ms, 0), top = parts[0];
+      const competing = t.hints.filter((h) => m.transcript !== undefined && m.audible !== undefined && h.at >= m.transcript - 500 && h.at <= m.audible);
+      return { text: "largest part: " + top.label + " (" + top.ms + " ms, " + Math.round((100 * top.ms) / Math.max(1, total)) + "% of the measured time)" + (competing.length ? "; " + competing.length + " session context update(s) were sent in this window" : ""), parts, competingHints: competing.length };
+    }
+    /** The middle of stop-to-audible over the last turns that measured it (ms), or null. */
+    median(key) {
+      const values = this.turns.map((t) => (this.report(t).rows.find((r) => r.key === key) || {}).ms).filter((v) => Number.isFinite(v) && v >= 0).sort((a, b) => a - b);
+      return values.length ? values[Math.floor(values.length / 2)] : null;
+    }
+  }
+
   /**
    * Text for the agent's own LLM, sent as a CONTEXTUAL UPDATE during the session (it never changes the agent's saved
    * configuration and never interrupts speech). It can only shape what the agent says NEXT: the voice that is already
@@ -725,6 +835,19 @@
     const items = live ? live.items.filter((i) => i.text).slice(-6).map((i) => '"' + clip(i.text, 40) + '"') : [];
     const lag = pen && pen.steps && (pen.behind >= 2 || pen.worstWordsAhead >= 12) ? " The pencil has been writing slower than you speak, so say less per step and give it time." : "";
     return "Board status: " + (items.length ? "written so far: " + items.join(", ") + "." : "nothing written yet.") + lag;
+  }
+
+  /**
+   * Is a teacher turn worth a planner call? Short acknowledgements ("Great!", "Okay, go on.") have nothing to draw, so
+   * asking Claude about them only adds a request, tokens and a wasted "nothing to draw" round trip.
+   */
+  function worthPlanning(text) {
+    const said = String(text || "").trim(), words = said.split(/\s+/).filter(Boolean);
+    if (!words.length) return false;
+    if (/[\d=+^]/.test(said)) return true;       // a number or an equation may be worth showing
+    if (words.length > 4) return true;
+    const acknowledgement = /^(great|good|nice|okay|ok|right|sure|yes|yeah|yep|exactly|correct|perfect|excellent|well done|alright|all right|got it|go on|i see|thanks|thank you|hello|hi|hmm|mm|of course|no problem|welcome)\b/i;
+    return !acknowledgement.test(said); // short but not an acknowledgement ("Let's draw it.") is planned
   }
 
   /** What the validator needs to know, when the caller has only a notebook summary. */
@@ -752,7 +875,7 @@
   return {
     BOARD, COLORS, SIZES, SHAPES, OPS, LIMITS, PLANNER_MODEL, PLANNER_SYSTEM,
     compileExpression, createValidator, validatePlan, buildPlannerMessage, summariseNotebook, deriveContext, planBoardStream,
-    locateCue, findReferences, endsWithQuestion, pacingNote, boardStatusNote, TEACHING_STYLE_NOTE, SpeechClock, createOrderedDelivery, MOMENTS, SIDES, PAGE_KEYWORDS,
+    locateCue, findReferences, endsWithQuestion, pacingNote, boardStatusNote, TEACHING_STYLE_NOTE, TurnTimer, worthPlanning, SpeechClock, createOrderedDelivery, MOMENTS, SIDES, PAGE_KEYWORDS,
     estimateSpeechMs, normalizeSpeech, cueSpoken, niceTicks,
   };
 });

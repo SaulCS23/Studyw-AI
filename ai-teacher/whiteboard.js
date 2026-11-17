@@ -24,6 +24,7 @@
 
   const INK = { ink: ["#24313a", "#eef3ea"], blue: ["#2459c4", "#8db8ff"], red: ["#c2412d", "#ff8d78"], green: ["#2c7a4b", "#7bd49f"], amber: ["#a8690a", "#f0c35a"], violet: ["#7440b8", "#c9a8f7"] };
   const FONT_SIZE = { title: 52, body: 39, small: 32 }; // printed letters, a little larger than before for legibility
+  const GRAPH_GUTTER = 200; // room to the right of every graph for labels that find no clear place beside their curve or point
   const TEXT_WIDTH = { title: 920, body: 560, small: 560 }; // how wide a line of text may get before it wraps
   const CALC_RESERVE = 150;                                 // room kept below the first line of a calculation
   const STROKE = 4;
@@ -140,6 +141,7 @@
       this.gates = [];
       this.waiting = false;          // the teacher asked the student something: nothing more is drawn until the student answers
       this.moments = [];             // teaching moments the planner has marked, for diagnostics and tests
+      this.compositionProblems = []; this.checkTimer = null; // the last stroke-level overlap check (see audit)
       this.timeline = [];            // when each step was released, started and finished (ms on this.now()), for measuring sync
       this.syncStats = { released: {}, refs: 0, lateRefs: 0, worstLateMs: 0 };
       this.penStats = { steps: 0, behind: 0, worstWordsAhead: 0, worstBehindMs: 0, actualMs: 0, expectedMs: 0 }; // what the pencil really did against the voice
@@ -277,6 +279,95 @@
       return [...top, ...children].map((i) => ({ id: i.id, type: i.type, text: i.text, w: i.frame ? i.frame.w : undefined, h: i.frame ? i.frame.h : undefined }));
     }
 
+    /* ----- Checking the finished composition ----- */
+
+    /**
+     * Measure the REAL drawn strokes (every pen path and dot, sampled along its length, in board coordinates) and report
+     * anything that is too close: any handwriting that comes within `pad` of the ink of a different element (the
+     * stroke widths are taken into account), a label that touches its own curve, and ink outside the element's own space
+     * or outside the page. Not bounding boxes: text is checked letter stroke by letter stroke. Works on every page.
+     * Returns { problems: string[], checked: number }.
+     */
+    audit(options) {
+      const pad = (options && options.pad) || 5, problems = [];
+      const ctm = this.svg.getScreenCTM && this.svg.getScreenCTM();
+      if (!ctm) return { problems: [], checked: 0, unavailable: true }; // not displayed: nothing can be measured (and nothing is reported)
+      const toBoard = ctm.inverse(), TEXTISH = new Set(["text", "tick", "axisname", "label"]);
+      const inks = [];
+      for (const page of this.pages) {
+        for (const el of page.g.querySelectorAll("path, circle")) {
+          if (el.closest("[data-wb-pointer]") || el.closest("clipPath") || el.style.visibility === "hidden" || el.style.opacity === "0") continue;
+          const owner = el.closest("[data-wb-id]"); if (!owner) continue;
+          const style = getComputedStyle(el), isDot = el.tagName === "circle", width = isDot ? 2 : parseFloat(style.strokeWidth) || 0;
+          if (!isDot && (style.stroke === "none" || width <= 1.2)) continue; // other fills and the faint grid are not ink that can collide
+          const type = owner.getAttribute("data-wb-type"), handGroup = el.closest("[data-wb-hand]");
+          const role = handGroup ? handGroup.getAttribute("data-wb-role") || "text" : type === "plot" ? "curve" : type === "point" ? "dot" : type === "graph" ? "axis" : "shape";
+          const m = toBoard.multiply(el.getScreenCTM()), points = [];
+          if (el.tagName === "circle") { const r = +el.getAttribute("r") || 0, cx = +el.getAttribute("cx"), cy = +el.getAttribute("cy"); if (r <= 0) continue; for (let k = 0; k < 12; k++) { const a = (k / 12) * 2 * Math.PI; points.push(new DOMPoint(cx + r * Math.cos(a), cy + r * Math.sin(a)).matrixTransform(m)); } }
+          else { let length = 0; try { length = el.getTotalLength(); } catch (e) { continue; } const n = Math.max(1, Math.ceil(length / 3)); for (let k = 0; k <= n; k++) points.push(el.getPointAtLength((length * k) / n).matrixTransform(m)); }
+          let kept = points.map((q) => [q.x, q.y]);
+          if (role === "curve") { // a curve is clipped to its plot: ink outside it is not on the page
+            const graph = this.items.get(owner.getAttribute("data-wb-id")).parent, g = graph && graph.graph;
+            if (g) { const x0 = graph.bbox.x + g.margin.l, y0 = graph.bbox.y + g.margin.t; kept = kept.filter(([x, y]) => x >= x0 && x <= x0 + g.plotW && y >= y0 && y <= y0 + g.plotH); }
+          }
+          if (kept.length) inks.push({ owner: owner.getAttribute("data-wb-id"), type, role, width: width || 2, points: kept, page: page.id });
+        }
+      }
+      const name = (ink) => { const item = this.items.get(ink.owner); return `${ink.role} of ${ink.type} "${ink.owner}"` + (item && item.text ? ` (${String(item.text).slice(0, 24)})` : ""); };
+      // A spatial hash makes the stroke-to-stroke comparison cheap.
+      const CELL = 16, grid = new Map(), key = (x, y) => Math.floor(x / CELL) + "," + Math.floor(y / CELL);
+      inks.forEach((ink, index) => ink.points.forEach(([x, y]) => { const k = key(x, y); if (!grid.has(k)) grid.set(k, []); grid.get(k).push([index, x, y]); }));
+      const reported = new Set();
+      inks.forEach((a, i) => {
+        if (!TEXTISH.has(a.role)) return;
+        const best = new Map(); // other ink index -> smallest gap
+        for (const [x, y] of a.points) for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const [j, bx, by] of grid.get(Math.floor(x / CELL) + dx + "," + (Math.floor(y / CELL) + dy)) || []) {
+          if (j === i) continue;
+          const b = inks[j]; if (b.page !== a.page) continue;
+          const sameOwner = a.owner === b.owner;
+          if (sameOwner && !(a.role === "label" && b.role === "curve")) continue; // a plot's own label must still keep off its own curve
+          if ((a.role === "tick" || a.role === "axisname") && (b.role === "curve" || b.role === "dot")) continue; // a curve may cross the axis numbers: that is how graphs are drawn
+          if (TEXTISH.has(b.role) && j < i && !sameOwner) continue; // each text pair once
+          const gap = Math.hypot(x - bx, y - by) - (a.width + b.width) / 2;
+          if (gap < pad && (!best.has(j) || gap < best.get(j))) best.set(j, gap);
+        }
+        for (const [j, gap] of best) {
+          const b = inks[j], tag = [a.owner, b.owner].sort().join("|") + a.role + b.role;
+          if (reported.has(tag)) continue; reported.add(tag);
+          problems.push(`${a.page}: ${name(a)} is ${Math.max(0, Math.round(gap))} units from ${name(b)}`);
+        }
+      });
+      // Ink must stay inside the space that was reserved for its element, and on the page.
+      const edge = BOARD;
+      for (const ink of inks) {
+        const item = this.items.get(ink.owner); if (!item || !item.bbox) continue;
+        const xs = ink.points.map((q) => q[0]), ys = ink.points.map((q) => q[1]), box = item.bbox;
+        const out = Math.max(box.x - Math.min(...xs), Math.max(...xs) - (box.x + box.w), box.y - Math.min(...ys), Math.max(...ys) - (box.y + box.h));
+        if (["write", "graph", "plot", "point"].includes(ink.type) && out > 3 && !reported.has("out" + ink.owner + ink.role)) { reported.add("out" + ink.owner + ink.role); problems.push(`${ink.page}: ${name(ink)} sticks out of its own space by ${Math.round(out)} units (ink x ${Math.round(Math.min(...xs))}-${Math.round(Math.max(...xs))}, y ${Math.round(Math.min(...ys))}-${Math.round(Math.max(...ys))}; space x ${Math.round(box.x)}-${Math.round(box.x + box.w)}, y ${Math.round(box.y)}-${Math.round(box.y + box.h)})`); }
+        if (Math.min(...xs) < 0 || Math.max(...xs) > edge.width || Math.min(...ys) < 0 || Math.max(...ys) > edge.height) if (!reported.has("page" + ink.owner)) { reported.add("page" + ink.owner); problems.push(`${ink.page}: ${name(ink)} leaves the page`); }
+      }
+      return { problems, checked: inks.length };
+    }
+
+    /**
+     * After the pencil goes idle, measure the finished composition once (off the drawing path, so it can never delay
+     * the pen or the voice) and report anything too close in the log. It only reports: placement already keeps things
+     * apart, so a line here means a layout rule is missing and should become a test.
+     */
+    scheduleCompositionCheck() {
+      if (this.checkTimer || typeof getComputedStyle !== "function") return;
+      this.checkTimer = setTimeout(() => {
+        this.checkTimer = null;
+        if (this.running || this.queue.length) return;
+        try {
+          const result = this.audit(); this.compositionProblems = result.problems;
+          const summary = result.problems.join("|");
+          if (result.problems.length && summary !== this.lastCompositionLog) this.log("warn", `Overlap check: ${result.problems.length} place(s) where handwriting is closer than 5 units to something else: ${result.problems.slice(0, 3).join("; ")}`);
+          this.lastCompositionLog = summary; // (the same report is not repeated after every pause)
+        } catch (error) { /* a measurement problem must never disturb the lesson */ }
+      }, 250);
+    }
+
     /* ----- Pages ----- */
 
     addPage(title) {
@@ -330,6 +421,7 @@
           if (entry.generation !== this.generation) continue;
           this.current = { cancelled: false };
           const startedAt = this.now(), pace = this.paceFor(entry);
+          if (this.onStepStart) { try { this.onStepStart({ op: entry.op.op, id: entry.op.id, at: startedAt }); } catch (error) { /* a diagnostic must never stop the pen */ } }
           entry.expectedMs = (this.naturalMs(entry.op) * pace) / this.timeScale;
           try { await this.run(entry.op, pace); } catch (error) { this.log("warn", "A drawing step failed: " + (error && error.message) + " " + JSON.stringify(entry.op).slice(0, 120)); }
           this.current = null;
@@ -338,6 +430,7 @@
       } finally {
         this.running = false; this.current = null;
         this.pencil.style.opacity = 0;
+        if (!this.queue.length) this.scheduleCompositionCheck();
         for (const resolve of this.idleWaiters.splice(0)) resolve();
       }
     }
@@ -580,6 +673,7 @@
       item.page.layout.release(id);
       for (const [name, anchor] of this.calcAnchors) if (anchor.itemId === id) this.calcAnchors.delete(name); // the line the equals signs were aligned to is gone
       if (item.parent) { item.parent.children.delete(id); if (item.parent.labels) item.parent.labels.release(id); } // a diagram label frees its place in the diagram
+      if (item.parent && item.parent.graph) this.forgetGraphInk(item.parent, id, item);
       this.items.delete(id);
     }
 
@@ -614,8 +708,8 @@
      * Put pen strokes on the board, hidden, ready to be drawn. Each stroke is its own path whose dash offset
      * is animated, so it is drawn along its length rather than faded or wiped in.
      */
-    buildHand(parent, strokes, color, width) {
-      const group = svgEl("g", { fill: "none", stroke: color, "stroke-width": width, "stroke-linecap": "round", "stroke-linejoin": "round", "data-wb-hand": strokes.length }, parent);
+    buildHand(parent, strokes, color, width, role) {
+      const group = svgEl("g", { fill: "none", stroke: color, "stroke-width": width, "stroke-linecap": "round", "stroke-linejoin": "round", "data-wb-hand": strokes.length, "data-wb-role": role || "text" }, parent);
       const paths = strokes.map((points, index) => {
         const length = hand.strokeLength(points);
         const path = svgEl("path", { d: linePath(points) }, group);
@@ -663,18 +757,19 @@
     }
 
     /** Write a handful of short labels (graph numbers, axis names) as quick handwriting. */
-    async writeLabels(parent, labels, color, offset, d, size) {
+    async writeLabels(parent, labels, color, offset, d, size, role) {
       const strokes = [], rects = [];
       for (const label of labels) {
-        const typeset = hand.typesetText(label.text, { size: label.size || size, seed: label.text });
+        const typeset = hand.typesetText(label.text, { size: label.size || size, maxWidth: label.maxWidth, seed: label.text });
         const dx = label.anchor === "end" ? -typeset.width : label.anchor === "middle" ? -typeset.width / 2 : 0;
         const top = label.top ? label.y : label.y - typeset.baseline; // label.y is the baseline unless `top` says it is the top edge
         strokes.push(...typeset.strokes.map((stroke) => stroke.map(([x, y]) => [x + label.x + dx, y + top])));
         rects.push({ x: label.x + dx, y: top, w: typeset.width, h: typeset.height });
       }
       if (!strokes.length) return null;
-      const built = this.buildHand(parent, strokes, color, clamp(size * 0.09, 1.8, 3));
+      const built = this.buildHand(parent, strokes, color, clamp(size * 0.09, 1.8, 3), role || "label");
       built.rects = rects;
+      built.strokes = strokes;
       await this.playHand(built, d(built.timeline.total), offset, SPEED.labelBoost);
       return built;
     }
@@ -870,14 +965,15 @@
     // ----- graphs -----
     async runGraph(op, d) {
       if (this.items.has(op.id)) this.removeItem(op.id);
-      const spot = this.reserve(op.id, op.w, op.h, { flow: "any", near: op.near, side: op.side, calc: op.calc });
+      const gutter = Math.max(0, Math.min(GRAPH_GUTTER, BOARD.width - 2 * MARGIN - op.w));
+      const spot = this.reserve(op.id, op.w + gutter, op.h, { flow: "any", near: op.near, side: op.side, calc: op.calc });
       const item = this.createItem(op.id, "graph", spot.page);
-      const margin = { l: 50, r: 18, t: 16, b: 38 };
+      const margin = { l: 50, r: 18 + gutter, t: 16, b: 38 };
       const plotW = spot.w - margin.l - margin.r, plotH = spot.h - margin.t - margin.b;
       const sx = (v) => margin.l + ((v - op.xmin) / (op.xmax - op.xmin)) * plotW;
       const sy = (v) => margin.t + plotH - ((v - op.ymin) / (op.ymax - op.ymin)) * plotH;
       item.g.setAttribute("transform", `translate(${num(spot.x)} ${num(spot.y)})`);
-      item.graph = { op, margin, plotW, plotH, sx, sy, axisX: 0 };
+      item.graph = { op, margin, plotW, plotH, sx, sy, axisX: 0, gutter };
       item.bbox = { x: spot.x, y: spot.y, w: spot.w, h: spot.h };
       this.emit();
       const offset = { x: spot.x, y: spot.y };
@@ -906,13 +1002,16 @@
       const labels = [];
       for (const v of xTicks) if (!(Math.abs(v) < 1e-9 && axisX !== margin.l)) labels.push({ text: String(v), x: sx(v), y: axisY + 28, anchor: "middle" });
       for (const v of yTicks) if (!(Math.abs(v) < 1e-9 && axisY !== margin.t + plotH)) labels.push({ text: String(v), x: axisX - 12, y: sy(v) + 8, anchor: "end" });
-      const tickLabels = await this.writeLabels(item.g, labels, "currentColor", offset, d, 26);
+      const tickLabels = await this.writeLabels(item.g, labels, "currentColor", offset, d, 26, "tick");
       const axisLabels = [];
       if (op.xlabel) axisLabels.push({ text: op.xlabel, x: margin.l + plotW - 4, y: axisY - 12, anchor: "end" });
       if (op.ylabel) axisLabels.push({ text: op.ylabel, x: axisX + 12, y: margin.t + 14, anchor: "start" });
-      const nameLabels = await this.writeLabels(item.g, axisLabels, "currentColor", offset, d, 32);
+      const nameLabels = await this.writeLabels(item.g, axisLabels, "currentColor", offset, d, 32, "axisname");
       // What a curve or point label must stay clear of: the axes, the numbers, the axis names, and (as they are drawn) the curves.
-      item.graph.obstacles = { rects: [{ x: margin.l - 6, y: axisY - 5, w: plotW + 10, h: 10 }, { x: axisX - 5, y: margin.t - 4, w: 10, h: plotH + 10 }, ...(tickLabels ? tickLabels.rects : []), ...(nameLabels ? nameLabels.rects : [])], lines: [] };
+      // "ink" is the real stroke geometry (polylines, graph coordinates) that later labels must keep clear of.
+      const tickMarks = [...xTicks.filter((v) => !(Math.abs(v) < 1e-9 && axisX !== margin.l)).map((v) => [[sx(v), axisY - 5], [sx(v), axisY + 5]]), ...yTicks.filter((v) => !(Math.abs(v) < 1e-9 && axisY !== margin.t + plotH)).map((v) => [[axisX - 5, sy(v)], [axisX + 5, sy(v)]])];
+      item.graph.obstacles = { rects: [{ x: margin.l - 6, y: axisY - 5, w: plotW + 10, h: 10 }, { x: axisX - 5, y: margin.t - 4, w: 10, h: plotH + 10 }, ...(tickLabels ? tickLabels.rects : []), ...(nameLabels ? nameLabels.rects : [])], lines: [],
+        ink: [[[margin.l - 6, axisY], [margin.l + plotW, axisY]], [[axisX, margin.t + plotH + 6], [axisX, margin.t]], ...tickMarks, ...(tickLabels ? tickLabels.strokes : []), ...(nameLabels ? nameLabels.strokes : [])] };
       item.text = [op.xlabel, op.ylabel].filter(Boolean).join(" vs ");
       this.describe();
     }
@@ -922,6 +1021,97 @@
       const item = this.createItem(id, type, graphItem.page, graphItem); // drawn inside the graph, so it moves with it
       item.bbox = { ...graphItem.bbox };
       return item;
+    }
+
+    /**
+     * Where a graph label goes: the nearest spot where its LETTERS (real strokes) keep clear of the axes, the numbers,
+     * every curve, every point and every other label, inside the plot or in the gutter beside it. If the label does not
+     * fit at its natural width it is wrapped onto two or three lines (never shrunk). Returns { x, y, maxWidth, ok }.
+     */
+    graphLabelRegions(graphItem) {
+      const { margin, plotW, plotH, gutter } = graphItem.graph;
+      const regions = [{ x: margin.l + 8, y: margin.t + 8, w: plotW - 16, h: plotH - 16 }]; // inside the plot, off its boundary
+      if (gutter >= 90) regions.push({ x: margin.l + plotW + 8, y: 4, w: graphItem.bbox.w - 4 - (margin.l + plotW + 8), h: graphItem.bbox.h - 8 }); // the gutter beside it
+      return regions;
+    }
+    placeGraphLabel(graphItem, anchor, text, size, extraInk) {
+      const obstacles = graphItem.graph.obstacles, regions = this.graphLabelRegions(graphItem);
+      const withExtra = { ...obstacles, ink: [...(obstacles.ink || []), ...(extraInk || [])] };
+      let fallback = null;
+      for (const maxWidth of [undefined, 150, 112]) {
+        const typeset = hand.typesetText(text, { size, maxWidth, seed: text });
+        const spot = Diagram.placeInk(anchor, { w: typeset.width, h: typeset.height, strokes: typeset.strokes }, withExtra, regions, { gap: 12, pad: 9 });
+        if (spot.ok) return { ...spot, maxWidth };
+        // none fits cleanly: remember the attempt that lies wholly inside the graph and comes closest to clear
+        if (spot.inRegion && (!fallback || spot.gap > fallback.gap)) fallback = { ...spot, maxWidth };
+        else if (!fallback) fallback = { ...spot, maxWidth };
+      }
+      this.log("warn", `The label "${text}" has no completely clear place on its graph (axes, numbers, curves and other labels leave no room); placed where it is least close.`);
+      return fallback;
+    }
+
+    /**
+     * A label with no completely clear place on its (crowded) graph is never squeezed in on top of something and never
+     * dropped: it is written as a short coloured note beside or below the graph, where the page layout finds free space
+     * (on a new page if need be). The colour ties it to its curve or point.
+     */
+    async noteBesideGraph(graphItem, op, d) {
+      this.log("info", `The graph has no clear place left for the label "${op.label}", so it is written as a note beside the graph.`);
+      await this.runWrite({ op: "write", kind: "text", content: op.label, color: op.color || "ink", size: "small", id: op.id + "-note", near: graphItem.id, side: "below" }, d);
+    }
+
+    /** A removed or replaced plot or point takes its curve, dot and label out of the graph's obstacles (and label list). */
+    forgetGraphInk(graphItem, id, item) {
+      const graph = graphItem.graph, obstacles = graph.obstacles; if (!obstacles) return;
+      const gone = new Set(item.inkRefs || []), goneLines = new Set(item.lineRefs || []);
+      for (const rec of graph.labels || []) if (rec.op && rec.op.id === id) { rec.strokes.forEach((poly) => gone.add(poly)); rec.rects.forEach((r) => goneLines.add(r)); }
+      graph.labels = (graph.labels || []).filter((rec) => !(rec.op && rec.op.id === id));
+      obstacles.ink = (obstacles.ink || []).filter((poly) => !gone.has(poly));
+      obstacles.lines = (obstacles.lines || []).filter((poly) => !goneLines.has(poly));
+      obstacles.rects = (obstacles.rects || []).filter((r) => !goneLines.has(r));
+    }
+    /** The part of an element the teacher points at or highlights: a graph's plot (not the label gutter), a point's dot. */
+    focusBox(item) {
+      const b = item.bbox;
+      if (item.type === "graph" && item.graph) return { x: b.x, y: b.y, w: Math.max(40, b.w - item.graph.gutter), h: b.h };
+      if (item.type === "point" && item.focus) return item.focus;
+      return b;
+    }
+
+    /** Remember a written graph label so it can be moved if something drawn later would run through it. */
+    rememberLabel(graphItem, written, anchor, text, size, op) {
+      const obstacles = graphItem.graph.obstacles;
+      obstacles.rects.push(...written.rects); obstacles.ink.push(...written.strokes);
+      (graphItem.graph.labels || (graphItem.graph.labels = [])).push({ written, anchor, text, size, op, strokes: written.strokes, rects: written.rects, dx: 0, dy: 0 });
+    }
+    /**
+     * A new curve or point must not run through a label that is already written. Each such label slides to the nearest
+     * clear place (it keeps its letters; nothing is erased or shrunk). If there is no clear place it stays and says so.
+     */
+    async relocateLabels(graphItem, newInk, d) {
+      const graph = graphItem.graph, obstacles = graph.obstacles;
+      for (const rec of graph.labels || []) {
+        if (Diagram.inkGap(rec.strokes, newInk, 9) >= 9) continue;
+        const rect = rec.rects[0];
+        obstacles.ink = obstacles.ink.filter((poly) => !rec.strokes.includes(poly)); obstacles.rects = obstacles.rects.filter((r) => !rec.rects.includes(r));
+        const relative = rec.strokes.map((poly) => poly.map(([x, y]) => [x - rect.x, y - rect.y]));
+        const spot = Diagram.placeInk(rec.anchor, { w: rect.w, h: rect.h, strokes: relative }, { ...obstacles, ink: [...obstacles.ink, ...newInk] }, this.graphLabelRegions(graphItem), { gap: 12, pad: 9 });
+        if (!spot.ok) { // nowhere on the graph: the label becomes a note beside it (nothing is dropped, nothing stays crowded)
+          graph.labels = graph.labels.filter((other) => other !== rec);
+          const group = rec.written.group;
+          await this.tween(d(250), (p) => { group.style.opacity = num(1 - p); }, linear); group.remove();
+          if (this.current && this.current.cancelled) return;
+          await this.noteBesideGraph(graphItem, { ...rec.op, label: rec.text, id: rec.op.id + "-moved" }, d);
+          continue;
+        }
+        const dx = spot.x - rect.x, dy = spot.y - rect.y, group = rec.written.group, baseX = rec.dx, baseY = rec.dy;
+        await this.tween(d(350), (p) => group.setAttribute("transform", `translate(${num(baseX + dx * p)} ${num(baseY + dy * p)})`), linear);
+        if (this.current && this.current.cancelled) return; // the student interrupted: stop here, write nothing more
+        rec.dx = baseX + dx; rec.dy = baseY + dy;
+        rec.strokes = rec.strokes.map((poly) => poly.map(([x, y]) => [x + dx, y + dy])); rec.rects = rec.rects.map((r) => ({ ...r, x: r.x + dx, y: r.y + dy }));
+        obstacles.ink.push(...rec.strokes); obstacles.rects.push(...rec.rects);
+        this.log("info", `The label "${rec.text}" moved a little to make room for what was just drawn.`);
+      }
     }
 
     async runPlot(op, d) {
@@ -953,14 +1143,23 @@
       const offset = { x: graphItem.bbox.x, y: graphItem.bbox.y };
       await this.drawPath(path, d(msFor(plotW * 1.4, SPEED.curve)), offset);
       const obstacles = graphItem.graph.obstacles || (graphItem.graph.obstacles = { rects: [], lines: [] });
-      obstacles.lines.push(...runs.filter((r) => r.length > 1));
+      const lineRuns = runs.filter((r) => r.length > 1);
+      obstacles.lines.push(...lineRuns); item.lineRefs = lineRuns;
+      obstacles.ink = obstacles.ink || [];
+      // Only the visible part of the curve is ink: the plot clips the rest. Cut the runs where they leave the plot.
+      const inPlot = ([x, y]) => x >= margin.l && x <= margin.l + plotW && y >= margin.t && y <= margin.t + plotH;
+      const visible = [];
+      for (const run of runs) { let piece = []; for (const point of run) { if (inPlot(point)) piece.push(point); else { if (piece.length > 1) visible.push(piece); piece = []; } } if (piece.length > 1) visible.push(piece); }
+      await this.relocateLabels(graphItem, visible, d); // earlier labels this curve runs through slide aside
+      obstacles.ink.push(...visible); item.inkRefs = [...visible];
       if (op.label && labelPoint) {
         // Beside the curve on a free side: never on a curve, an axis, a number or another label.
-        const size = hand.typesetText(op.label, { size: 28 });
-        const spot = Diagram.placeLabel([sx(labelPoint.x), sy(labelPoint.y)], { w: size.width, h: size.height }, { rects: obstacles.rects, lines: obstacles.lines }, { x: margin.l, y: margin.t, w: plotW, h: plotH }, { gap: 12 });
-        if (!spot.ok) this.log("info", `The label "${op.label}" has no completely free place beside its curve; placed where it overlaps least.`);
-        const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start" }], colorVar(op.color), offset, d, 28);
-        if (written) obstacles.rects.push(...written.rects);
+        const spot = this.placeGraphLabel(graphItem, [sx(labelPoint.x), sy(labelPoint.y)], op.label, 28);
+        if (!spot.ok) await this.noteBesideGraph(graphItem, op, d);
+        else {
+          const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start", maxWidth: spot.maxWidth }], colorVar(op.color), offset, d, 28);
+          if (written) this.rememberLabel(graphItem, written, [sx(labelPoint.x), sy(labelPoint.y)], op.label, 28, op);
+        }
       }
     }
 
@@ -974,12 +1173,19 @@
       const dot = svgEl("circle", { cx: num(cx), cy: num(cy), r: 0, fill: colorVar(op.color) }, item.g);
       this.movePencil(offset.x + cx, offset.y + cy, true);
       await this.tween(d(300), (p) => { dot.setAttribute("r", num(7 * p)); });
+      const obstacles = graphItem.graph.obstacles || (graphItem.graph.obstacles = { rects: [], lines: [], ink: [] });
+      obstacles.ink = obstacles.ink || [];
+      const dotInk = Array.from({ length: 13 }, (_, k) => [cx + 9 * Math.cos((k / 12) * 2 * Math.PI), cy + 9 * Math.sin((k / 12) * 2 * Math.PI)]);
+      await this.relocateLabels(graphItem, [dotInk], d);
+      obstacles.ink.push(dotInk); // later labels keep clear of the dot too
+      item.inkRefs = [dotInk]; item.focus = { x: offset.x + cx - 16, y: offset.y + cy - 16, w: 32, h: 32 };
       if (op.label) {
-        const size = hand.typesetText(op.label, { size: 28 }), obstacles = graphItem.graph.obstacles || (graphItem.graph.obstacles = { rects: [], lines: [] });
-        const dotRect = { x: cx - 9, y: cy - 9, w: 18, h: 18 };
-        const spot = Diagram.placeLabel([cx, cy], { w: size.width, h: size.height }, { rects: [...obstacles.rects, dotRect], lines: obstacles.lines }, { x: 2, y: 2, w: graphItem.bbox.w - 4, h: graphItem.bbox.h - 4 }, { gap: 12 });
-        const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start" }], colorVar(op.color), offset, d, 28);
-        if (written) obstacles.rects.push(...written.rects);
+        const spot = this.placeGraphLabel(graphItem, [cx, cy], op.label, 28);
+        if (!spot.ok) await this.noteBesideGraph(graphItem, op, d);
+        else {
+          const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start", maxWidth: spot.maxWidth }], colorVar(op.color), offset, d, 28);
+          if (written) this.rememberLabel(graphItem, written, [cx, cy], op.label, 28, op);
+        }
       }
     }
 
@@ -1091,7 +1297,7 @@
       if (!item || !item.bbox) return;
       if (["text", "math", "graph", "group", "diagram", "node"].includes(item.type)) {
         if (item.marker) item.marker.remove();
-        const pad = 8, b = item.bbox, top = item.parent || item;
+        const pad = 8, b = this.focusBox(item), top = item.parent || item;
         const marker = svgEl("rect", { x: b.x - pad, y: b.y - pad / 2, width: 0, height: b.h + pad, rx: 8, fill: colorVar(op.color), style: "opacity:.3;pointer-events:none" });
         item.page.g.insertBefore(marker, top.g); // behind the writing, like highlighter pen
         item.marker = marker;
@@ -1113,7 +1319,7 @@
       if (!item || !item.bbox) return;
       const detour = item.page !== this.live;
       if (detour) { this.setLive(item.page); await this.tween(d(300), () => {}); }
-      const b = item.bbox, rx = b.w / 2 + 20, ry = b.h / 2 + 14;
+      const b = this.focusBox(item), rx = b.w / 2 + 20, ry = b.h / 2 + 14;
       const ring = svgEl("path", { d: ellipsePath(b.x + b.w / 2, b.y + b.h / 2, rx, ry), fill: "none", stroke: colorVar("amber"), "stroke-width": 4, "stroke-linecap": "round", "data-wb-pointer": op.target }, item.page.g);
       try {
         await this.drawPath(ring, d(msFor(2 * Math.PI * Math.sqrt((rx * rx + ry * ry) / 2), SPEED.curve)));

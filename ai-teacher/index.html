@@ -73,6 +73,13 @@ button{font:inherit}
 .wbboard{padding:0;overflow:hidden}
 .caption{background:var(--caption-bg);color:var(--caption-ink);border-radius:10px;padding:12px 18px;min-height:3.6em;font-size:1.3rem;line-height:1.4;text-align:center;text-wrap:balance}
 .caption.you{font-style:italic;opacity:.85}
+.timing{font-size:.9rem;color:var(--muted)}
+.timing summary{cursor:pointer;padding:4px 2px}
+.timing table{border-collapse:collapse;width:100%;margin-top:4px}
+.timing td{padding:3px 8px;border-top:1px solid var(--line);vertical-align:top}
+.timing td.ms{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--ink)}
+.timing .na{color:var(--muted);font-style:italic}
+.timing .verdict{margin-top:6px;color:var(--ink)}
 .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .call{border:none;border-radius:999px;padding:14px 26px;font-weight:700;font-size:1.05rem;cursor:pointer;background:var(--accent);color:var(--accent-ink);display:inline-flex;gap:10px;align-items:center}
 .call.live{background:var(--danger)}
@@ -120,6 +127,7 @@ code{background:var(--bg);padding:1px 6px;border-radius:5px}
   </nav>
 
   <div class="caption" id="caption">Subtitles will appear here.</div>
+  <details class="timing" id="timing"><summary id="timingSummary">Turn timing (how quickly the teacher answers)</summary><div id="timingBody">Timing appears after your first turn. Only numbers are shown: no speech, text or keys.</div></details>
 
   <div class="controls">
     <button class="call" id="call" type="button">
@@ -254,6 +262,7 @@ function getWhiteboard(){
     onNotebook: updateNotebook,
     onMoment: (m) => boardEvent("moment", "info", "Teaching moment: " + m.kind.replace("_", " ") + (m.note ? " (" + m.note + ")" : "") + (m.kind === "wait" ? ". Drawing pauses until the student answers." : ".")),
     onRef: (r) => boardEvent("sync", r.late ? "warn" : "info", 'Reference "' + r.ref + '": ' + r.id + " was finished " + (r.finishedAfterReferenceMs <= 0 ? Math.abs(r.finishedAfterReferenceMs) + " ms before" : r.finishedAfterReferenceMs + " ms after") + " the teacher said it" + (r.late ? " (too late)." : ".")),
+    onStepStart: (step) => { if (/^(write|graph|plot|point|shape|dframe|dnode|dlink|correct)$/.test(step.op)){ turnTimer.mark("penStart", step.at); renderTiming(); } },
     onGate: (g) => boardEvent("sync", "info", "Step " + g.op + (g.id ? " " + g.id : "") + ' (cue "' + g.cue + '") released: ' + g.reason + " after " + g.waitedMs + " ms."),
   });
   return whiteboard;
@@ -300,15 +309,48 @@ function reportSync(){
   const pen = whiteboard.pacing();
   if (pen.steps) boardEvent("pen", pen.behind ? "warn" : "info", "Pencil so far: " + pen.steps + " steps written, took " + pen.penRatio.toFixed(2) + "x the planned time; the voice had moved on before the pencil finished in " + pen.behind + (pen.behind ? " (worst " + pen.worstWordsAhead + " words, " + pen.worstBehindMs + " ms ahead)" : "") + ".");
 }
+/* ----- Turn timing: where does the time go between "I stopped speaking" and "the teacher is heard"? ----- */
+// The timing is a diagnostic: if the engine scripts are missing or stale it must never stop the lesson from starting.
+const turnTimer = (window.WhiteboardCore && window.WhiteboardCore.TurnTimer) ? new window.WhiteboardCore.TurnTimer() : { speaking: false, vad(){}, mark(){}, audible(){}, count(){}, hint(){}, longTask(){}, ping(){}, report(){ return null; }, median(){ return null; }, turns: [], current: null }; window.__timing = turnTimer;
+const tNow = () => performance.now();
+let timingRender = null, timingLogged = new Set();
+function fmtMs(ms){ return ms === null || ms === undefined ? '<span class="na">unavailable</span>' : ms + " ms"; }
+function renderTiming(){
+  clearTimeout(timingRender);
+  timingRender = setTimeout(() => {
+    const report = turnTimer.report(); if (!report) return;
+    const rows = report.rows.filter(r => r.ms !== null || ["stopToAudible", "stopToTranscript", "transcriptToText"].includes(r.key));
+    const median = turnTimer.median("stopToAudible");
+    $("timingSummary").textContent = "Turn timing: " + (report.rows[0].ms !== null ? "heard " + report.rows[0].ms + " ms after you stopped" : "waiting for the teacher") + (median !== null ? " (typical " + median + " ms)" : "");
+    $("timingBody").innerHTML = "<table>" + rows.map(r => "<tr><td>" + r.label + (r.note ? '<br><span class="na">' + r.note + "</span>" : "") + '</td><td class="ms">' + fmtMs(r.ms) + "</td></tr>").join("") + "</table>"
+      + '<div class="verdict">' + report.verdict.text.charAt(0).toUpperCase() + report.verdict.text.slice(1) + ".</div>"
+      + '<div class="na">Whiteboard planner calls this turn: ' + report.plannerCalls + (report.plannerSkipped ? " (skipped " + report.plannerSkipped + ", nothing to draw)" : "") + " · longest page task: " + report.longestTaskMs + " ms · network ping: " + (report.pingMs === null ? "unavailable" : Math.round(report.pingMs) + " ms") + " · session hints this turn: " + report.hints + ".</div>"
+      + '<div class="na">Not reported by the SDK: ' + report.unavailable.join("; ") + ".</div>";
+    // one console line per turn, numbers only (no speech, no text, no keys)
+    const turn = turnTimer.current, key = turnTimer.turns.length + ":" + (turn && turn.marks.audible);
+    if (turn && turn.marks.audible !== undefined && !timingLogged.has(key)){ timingLogged.add(key);
+      boardEvent("timing", "info", "Turn timing: " + report.rows.filter(r => r.ms !== null).map(r => r.key + " " + r.ms + " ms").join(", ") + " | " + report.verdict.text); }
+  }, 120);
+}
+try { new PerformanceObserver(list => { for (const e of list.getEntries()){ turnTimer.longTask(e.startTime, e.duration); } }).observe({ entryTypes: ["longtask"] }); } catch(e){ /* long task timing is not available in every browser */ }
+
 /* Session-only messages to the agent's LLM (contextual updates). They never edit the agent's saved configuration, never
    interrupt it, and cannot slow or pause speech that is already playing: they only shape what it says next. */
 function hintsOn(){ return $("teachHints").value === "on" && convo && typeof convo.sendContextualUpdate === "function"; }
-function sendHint(text, what){ if (!hintsOn()) return; try { convo.sendContextualUpdate(text); boardEvent("hint", "info", "Told the agent (this session only): " + what); } catch (error){ boardEvent("hint", "warn", "Could not send a hint to the agent: " + (error && error.message)); } }
+function sendHint(text, what){ if (!hintsOn()) return; try { turnTimer.hint(what, tNow()); convo.sendContextualUpdate(text); boardEvent("hint", "info", "Told the agent (this session only): " + what); } catch (error){ boardEvent("hint", "warn", "Could not send a hint to the agent: " + (error && error.message)); } }
 let statusTimer = null;
+/* Every context update stays in the agent's prompt for the rest of the lesson, so the board status is sent only when it
+   changed, never while the student is talking, and at most once every 20 seconds: a prompt that keeps growing slows the agent's replies. */
+let lastStatusText = "", lastStatusAt = -Infinity;
 function sendBoardStatus(){ // once the pencil has finished, tell the agent what is written so the next turn builds on it
   if (!hintsOn() || !whiteboard) return;
   clearTimeout(statusTimer);
-  statusTimer = setTimeout(async () => { const wb = whiteboard; if (!wb) return; await wb.idle(); sendHint(window.WhiteboardCore.boardStatusNote(wb.notebook(), wb.pacing()), "board status"); }, 400);
+  statusTimer = setTimeout(async () => {
+    const wb = whiteboard; if (!wb) return; await wb.idle();
+    const text = window.WhiteboardCore.boardStatusNote(wb.notebook(), wb.pacing());
+    if (text === lastStatusText || tNow() - lastStatusAt < 20000 || turnTimer.speaking) return;
+    lastStatusText = text; lastStatusAt = tNow(); sendHint(text, "board status");
+  }, 400);
 }
 function abortPlans(){ for (const c of plans) c.abort(); plans.clear(); }
 function htmlToText(html){ // what the agent's own board HTML says, without drawing it
@@ -326,7 +368,7 @@ function noteMessage(role, text){
   else transcript.push({ role, text });
   if (transcript.length > 12) transcript.shift();
 }
-const planTimers = new Set();
+const planTimers = new Set(); let lastPlannedText = "";
 function scheduleBoard(options){
   // Start at once (a few ms only merges duplicate events): every ms here is a ms between the voice and the first stroke.
   // An early plan and its continuation each keep their own timer, so a continuation arriving within the same few ms
@@ -359,6 +401,7 @@ async function drawAnimatedBoard(options){
   const abort = new AbortController(); plans.add(abort);
   lastPlanStart = Date.now();
   const t0 = performance.now(); let firstStepMs = null, steps = 0;
+  turnTimer.mark("plannerRequest", t0); turnTimer.count("plannerCalls");
   const stale = () => myTurn !== turnReq, previous = firstPlanDone;
   let momentSeen = null;
   const early = !!options.text && !options.handled; // this plan has only the first sentence of the turn
@@ -366,6 +409,7 @@ async function drawAnimatedBoard(options){
     // A "wait" decided from the first sentence alone (a rhetorical "Where will it land?") must not stop the rest of the turn.
     if (early && ops.some(o => o.op === "moment" && o.kind === "wait")){ boardEvent("moment", "info", "Ignoring a wait decided from the first sentence only; the rest of the turn is planned separately."); ops = ops.filter(o => !(o.op === "moment" && o.kind === "wait")); }
     const drawing = ops.filter(o => o.op !== "moment"); ops.forEach(o => { if (o.op === "moment") momentSeen = o.kind; });
+    if (drawing.length) turnTimer.mark("plannerFirstOp", performance.now());
     if (drawing.length && firstStepMs === null){ firstStepMs = Math.round(performance.now() - t0); showSurface("animated"); setBadge("Animated · drawing", "live"); boardEvent("first-step", "info", "First drawing step arrived after " + firstStepMs + " ms; the pen starts now."); }
     steps += drawing.length; board.enqueue(ops);
   };
@@ -478,6 +522,7 @@ async function start(isRetry){
         if (mode === "speaking"){
           clearTimeout(endTimer); // a short gap between sentences is not the end of the turn
           if (!wasSpeaking){
+            turnTimer.audible(tNow(), "speaking mode"); renderTiming(); // (an exact playback event, when the SDK sends one, replaces this)
             const wb = getWhiteboard();
             // Text that arrived long after its voice had ended (and no voice ever started for it) belongs to a finished turn.
             if (wb && turnOpen && wb.clock.startedAt == null && wb.clock.messageAt != null && wb.now() - wb.clock.messageAt > 4000) turnOpen = false;
@@ -490,17 +535,22 @@ async function start(isRetry){
         setMode(mode === "speaking" ? "speaking" : "listening");
       },
       // The agent was cut off by the student: stop drawing whatever was still queued.
-      onInterruption: () => interruptBoard(),
+      onInterruption: () => { interruptBoard(); turnTimer.mark("interrupted", tNow()); },
+      // Voice activity (the SDK's own score for whether the student is speaking), used only to time the turn.
+      onVadScore: ({ vadScore }) => turnTimer.vad(vadScore, tNow()),
+      onPing: (ping) => { turnTimer.ping(ping && ping.ping_ms); },
+      onAudio: () => { turnTimer.mark("audioChunk", tNow()); },
+      onAudioAlignment: () => { turnTimer.mark("audioChunk", tNow()); },
       // Fires as each piece of the teacher's voice actually plays, if the agent sends character timing.
       // When it does, drawing steps wait for the words they belong to. When it doesn't, drawing is paced by time.
       // WebSocket connections only: ElevenLabs does not send audio events (and so no alignment) over WebRTC.
-      onAudioAlignmentPlayback: (e) => { const a = e && e.alignment, chars = a && a.chars; if (whiteboard && Array.isArray(chars)) whiteboard.speechProgress(chars.join(""), a.char_start_times_ms, e.event_id); },
+      onAudioAlignmentPlayback: (e) => { turnTimer.audible(tNow(), "audio playback event"); renderTiming(); const a = e && e.alignment, chars = a && a.chars; if (whiteboard && Array.isArray(chars)) whiteboard.speechProgress(chars.join(""), a.char_start_times_ms, e.event_id); },
       // The agent's reply as it is being written, before the voice has finished it. Only sent if "agent_chat_response_part"
       // is enabled in the agent's client events. The first complete sentence is enough to start the pen early.
       onAgentChatResponsePart: (part) => {
         if (!part || !useAnimatedBoard()) return;
         if (part.type === "start"){ partsText = ""; earlyText = ""; }
-        if (part.text) partsText += part.text;
+        if (part.text){ partsText += part.text; turnTimer.mark("agentText", tNow(), "streamed text"); }
         const wb = getWhiteboard(); if (wb && turnOpen) wb.setTurnText(partsText);
         const sentenceEnd = Math.max(partsText.lastIndexOf(". "), partsText.lastIndexOf("? "), partsText.lastIndexOf("! "));
         if (!earlyText && sentenceEnd >= 25){ // long enough to be real content, not "Sure." or "Great question!"
@@ -516,7 +566,8 @@ async function start(isRetry){
         captionEl.classList.toggle("you", fromYou);
         captionEl.textContent = fromYou ? "You: " + text : text;
         if (!fromYou) heardAgent = true;
-        if (fromYou){ interruptBoard(); toolUsedThisTurn = false; toolHint = ""; lastToolHtml = ""; lastPlanStart = 0; noteMessage("student", text); }
+        turnTimer.mark(fromYou ? "transcript" : "agentText", tNow(), fromYou ? undefined : "the final message"); renderTiming();
+        if (fromYou){ lastPlannedText = ""; interruptBoard(); toolUsedThisTurn = false; toolHint = ""; lastToolHtml = ""; lastPlanStart = 0; noteMessage("student", text); }
         else {
           const wb = getWhiteboard();
           if (wb){ if (!turnOpen){ wb.beginTurn(text); turnOpen = true; } else wb.setTurnText(text); } // the text can arrive before or after the voice starts
@@ -526,7 +577,13 @@ async function start(isRetry){
             boardEvent("turn", "info", "Teacher turn complete (" + text.length + " characters); " + (rest.length >= 25 ? "planning the rest." : "the early plan covers it."));
             if (rest.length >= 25 && useAnimatedBoard()) scheduleBoard({ handled: earlyText });
             earlyText = ""; partsText = "";
+          } else if (text === lastPlannedText){
+            boardEvent("turn", "info", "The same teacher message arrived again; not planning it twice.");
+          } else if (useAnimatedBoard() && !toolHint && window.WhiteboardCore.worthPlanning && !window.WhiteboardCore.worthPlanning(text)){
+            turnTimer.count("plannerSkipped"); lastPlannedText = text;
+            boardEvent("turn", "info", "Short teacher reply (" + text.length + " characters): nothing to draw, so no planner call.");
           } else {
+            lastPlannedText = text;
             boardEvent("turn", "info", "Teacher turn received (" + text.length + " characters). " + (useAnimatedBoard() ? "Planning the drawing." : "Classic board."));
             scheduleBoard();
           }
@@ -545,7 +602,7 @@ $("call").onclick = async () => { if (convo){ await convo.endSession(); } else {
 $("typed").addEventListener("input", () => { if (convo) convo.sendUserActivity(); });
 function sendTyped(){ const q = $("typed").value.trim(); if (!q) return;
   if (!convo){ statusEl.textContent = "Press Start lesson first."; return; }
-  convo.sendUserMessage(q); $("typed").value = ""; interruptBoard(); toolUsedThisTurn = false; toolHint = ""; lastToolHtml = ""; lastPlanStart = 0; noteMessage("student", q);
+  lastPlannedText = ""; turnTimer.mark("typed", tNow()); convo.sendUserMessage(q); $("typed").value = ""; interruptBoard(); toolUsedThisTurn = false; toolHint = ""; lastToolHtml = ""; lastPlanStart = 0; noteMessage("student", q);
   captionEl.classList.add("you"); captionEl.textContent = "You: " + q;
 }
 $("sendBtn").onclick = sendTyped;

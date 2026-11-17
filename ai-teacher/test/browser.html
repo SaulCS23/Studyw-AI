@@ -72,7 +72,7 @@ const wanted = params.get("lesson");
 if (wanted) {
   const order = [F.mathematics, F.biology, F.history, F.topicChange, F.handwriting];
   const index = order.findIndex((l) => l.subject.startsWith(wanted));
-  (async () => { if (wanted === "long") await playLesson(board, F.longLesson(12)); else if (wanted === "longd") await playLesson(board, F.longDiagrams(9)); else if (wanted === "gref") await playLesson(board, F.graphWithReference); else for (let i = 0; i <= index; i++) { await playLesson(board, order[i]); if (params.has("view") && i === index) break; } if (params.get("page")) board.viewPage(Number(params.get("page"))); if (params.has("dump")) $("results").textContent = JSON.stringify(board.summary().map((i) => [i.id, i.page, Math.round(i.x), Math.round(i.y), Math.round(i.w), Math.round(i.h)])); document.title += " (done)"; })();
+  (async () => { if (wanted === "long") await playLesson(board, F.longLesson(12)); else if (wanted === "longd") await playLesson(board, F.longDiagrams(9)); else if (wanted === "gref") await playLesson(board, F.graphWithReference); else if (wanted === "tangent") await playLesson(board, F.tangentLesson); else for (let i = 0; i <= index; i++) { await playLesson(board, order[i]); if (params.has("view") && i === index) break; } if (params.get("page")) board.viewPage(Number(params.get("page"))); if (params.has("dump")) $("results").textContent = JSON.stringify(board.summary().map((i) => [i.id, i.page, Math.round(i.x), Math.round(i.y), Math.round(i.w), Math.round(i.h)])); document.title += " (done)"; })();
 }
 
 /* ---------- Geometry helpers: measure what is really on the page ---------- */
@@ -457,6 +457,83 @@ async function runSelfTest() {
     wb.beginTurn(sent.teacher); wb.speechStart(); wb.enqueue(ops(sent.ops, wb));
     await sleep(300); wb.cancelPending(); await wb.idle(); const countAtCut = ids(wb).length; await sleep(1500);
     check("audio interrupted: the steps that were waiting for words never spoken are discarded (no outdated drawing)", ids(wb).length === countAtCut && !wb.items.has("s3"), ids(wb).join(","));
+
+    /* 9. RENDERED INK AUDIT: the real drawn strokes, not bounding boxes (regression for the tangent/derivative screenshot) */
+    wb = fresh({ timeScale: 60 });
+    await playLesson(wb, F.tangentLesson);
+    let audited = wb.audit();
+    check("ink audit (screenshot lesson): the audit really measured strokes of every element", audited.checked > 150, "checked " + audited.checked);
+    check("ink audit (screenshot lesson): the orange tangent label, the blue derivative text and the vertex label keep clear of axes, numbers, curves and each other", audited.problems.length === 0, audited.problems.join(" | "));
+    check("ink audit (screenshot lesson): labels stay inside the graph's own space and the page", !audited.problems.some((m) => /sticks out|leaves the page/.test(m)), audited.problems.join(" | "));
+    check("ink audit (screenshot lesson): the older element-box check agrees (zero overlap between elements)", geometryProblems(wb).length === 0, geometryProblems(wb).join(" | "));
+    // the audit itself must be able to see a collision: put a blue sentence right on top of the tangent label
+    const ghost = wb.items.get("ttangent"), hit = ghost.g.querySelector("[data-wb-hand]").getBBox();
+    const probe = wb.createItem("probe", "write", wb.items.get("tg").page); probe.bbox = { ...wb.items.get("tg").bbox };
+    const probeGroup = wb.buildHand(probe.g, [[[ (wb.items.get("tg").bbox.x + hit.x), (wb.items.get("tg").bbox.y + hit.y + hit.height / 2) ], [ (wb.items.get("tg").bbox.x + hit.x + hit.width), (wb.items.get("tg").bbox.y + hit.y + hit.height / 2) ]]], "#0000ff", 3, "text");
+    probeGroup.paths.forEach((p) => { p.path.style.visibility = "visible"; p.path.style.strokeDashoffset = "0"; });
+    check("ink audit: it sees a collision when one exists (a line of ink dropped on a label is reported)", wb.audit().problems.some((m) => m.includes("probe")), wb.audit().problems.join(" | "));
+    wb.removeItem("probe");
+
+    /* 9c. Review fixes: erased curves free their labels and ink; pointing at a point circles the dot, at a graph the plot; dots are audited */
+    wb = fresh({ timeScale: 80 });
+    await playLesson(wb, F.tangentLesson);
+    const gItem = wb.items.get("tg"), labelsBefore = gItem.graph.labels.length, inkBefore = gItem.graph.obstacles.ink.length;
+    wb.enqueue(ops([{ op: "erase", target: "ttangent" }], wb)); await wb.idle();
+    check("erase a plot: its label record, its curve and its label strokes leave the graph's obstacles (nothing stale is avoided or moved later)", gItem.graph.labels.length === labelsBefore - 1 && gItem.graph.obstacles.ink.length < inkBefore && !gItem.graph.labels.some((l) => l.op && l.op.id === "ttangent"), "labels " + labelsBefore + " -> " + gItem.graph.labels.length + ", ink " + inkBefore + " -> " + gItem.graph.obstacles.ink.length);
+    check("erase a plot: nothing stale is left to collide with, and the audit is still clean", wb.audit().problems.length === 0, wb.audit().problems.join(" | "));
+    const plotBox = wb.focusBox(gItem), dotBox = wb.focusBox(wb.items.get("tvertex"));
+    check("pointing: at a graph it circles the plot (not the label gutter), at a point it circles the dot", plotBox.w === gItem.bbox.w - gItem.graph.gutter && dotBox.w <= 40 && dotBox.h <= 40, JSON.stringify({ plotBox, dotBox }));
+    const vertexItem = wb.items.get("tvertex"), dotCircle = vertexItem.g.querySelector("circle"), dotAt = dotCircle.getBoundingClientRect();
+    const dotProbe = wb.createItem("dotprobe", "write", gItem.page); dotProbe.bbox = { ...gItem.bbox };
+    const svgBox = wb.svg.getBoundingClientRect(), scale = svgBox.width / 1000;
+    const cxBoard = (dotAt.left + dotAt.width / 2 - svgBox.left) / scale, cyBoard = (dotAt.top + dotAt.height / 2 - svgBox.top) / scale;
+    const dotInkGroup = wb.buildHand(dotProbe.g, [[[cxBoard - 30, cyBoard], [cxBoard + 30, cyBoard]]], "#0000ff", 3, "text");
+    dotInkGroup.paths.forEach((p) => { p.path.style.visibility = "visible"; p.path.style.strokeDashoffset = "0"; });
+    check("ink audit: a point's dot counts as ink (handwriting across the dot is reported)", wb.audit().problems.some((m) => m.includes("dotprobe") && m.includes("dot")), wb.audit().problems.join(" | "));
+    wb.removeItem("dotprobe");
+
+    /* 9a. The same stroke audit on every simulated lesson (all subjects, diagrams, long lessons) */
+    for (const [name, lesson] of [["mathematics", F.mathematics], ["biology", F.biology], ["history", F.history], ["topic change", F.topicChange], ["handwriting showcase", F.handwriting], ["long lesson", F.longLesson(10)], ["long diagrams", F.longDiagrams(8)], ["derivative", F.derivative]]) {
+      wb = fresh({ timeScale: 80 });
+      await playLesson(wb, lesson);
+      const found = wb.audit();
+      check("ink audit: lesson '" + name + "' has no stroke closer than 5 units to another element's (" + found.checked + " strokes measured)", found.problems.length === 0, found.problems.slice(0, 5).join(" | "));
+    }
+
+    /* 9b. RANDOM MULTI-TURN GRAPH LESSONS: annotations planned in later turns never collide with earlier elements (audited on the real strokes) */
+    {
+      const rnd = (seed) => { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; };
+      const fns = ["x^2", "2*x-1", "sin(x)", "x^3/4", "0.5*x+1", "abs(x)", "-x^2+4", "2*x"];
+      const labelPool = ["y = x²", "tangent at x = 1", "derivative: slope 2x", "slope", "maximum", "f(x)", "a long annotation for the curve", "vertex", "(1, 1)", "zero", "area under the curve", "minimum"];
+      const colors = ["blue", "amber", "red", "green", "violet"];
+      const sentence = ["The derivative is the slope of the tangent line", "At x equals one the slope is two", "Notice how the curve flattens near the vertex", "So the rate of change is largest on the right"];
+      const lessons = Number(params.get("stress")) || 14; let totalChecked = 0; const failures = [];
+      for (let seed = 1; seed <= lessons; seed++) {
+        const r = rnd(seed * 977), pick = (list) => list[Math.floor(r() * list.length)];
+        wb = fresh({ timeScale: 80 });
+        const id = (n) => n + seed;
+        const turns = [{ teacher: "Graph.", ops: [{ op: "graph", id: "g", w: 300 + Math.floor(r() * 160), h: 220 + Math.floor(r() * 90), xmin: -3, xmax: 3, ymin: -4, ymax: 9, xlabel: "x", ylabel: "y", cue: "Graph" }] }];
+        const turnCount = 3 + Math.floor(r() * 3);
+        for (let t = 0; t < turnCount; t++) {
+          const opsList = [];
+          for (let k = 0, n = 1 + Math.floor(r() * 3); k < n; k++) {
+            const kind = r();
+            if (kind < 0.4) opsList.push({ op: "plot", graph: "g", fn: pick(fns), color: pick(colors), label: r() < 0.8 ? pick(labelPool) : undefined, id: "p" + t + "_" + k });
+            else if (kind < 0.65) opsList.push({ op: "point", graph: "g", px: Math.round((r() * 4 - 2) * 2) / 2, py: Math.round(r() * 6 * 2) / 2, label: r() < 0.8 ? pick(labelPool) : undefined, color: pick(colors), id: "q" + t + "_" + k });
+            else if (kind < 0.85) opsList.push({ op: "write", kind: "text", content: pick(sentence), color: pick(colors), id: "w" + t + "_" + k, near: "g", side: pick(["right", "below"]) });
+            else opsList.push({ op: "write", kind: "math", content: pick(["f'(x) = 2x", "y = x^2 + 1", "\\frac{d}{dx}(x^2) = 2x"]), color: pick(colors), id: "m" + t + "_" + k, near: "g", side: pick(["right", "below"]) });
+          }
+          turns.push({ teacher: "Turn " + t + ".", ops: opsList });
+        }
+        for (const turn of turns) {
+          playTurn(wb, turn); await wb.idle();
+          const found = wb.audit(); totalChecked += found.checked;
+          if (found.problems.length) { failures.push("lesson " + seed + " turn '" + turn.teacher + "': " + found.problems.slice(0, 3).join(" | ") + " ## labels " + JSON.stringify((wb.items.get("g").graph.labels || []).map((l) => [l.text, l.rects.map((r) => [Math.round(r.x), Math.round(r.y), Math.round(r.w), Math.round(r.h)])])) + " margin " + JSON.stringify(wb.items.get("g").graph.margin) + " plot " + Math.round(wb.items.get("g").graph.plotW) + "x" + Math.round(wb.items.get("g").graph.plotH) + " bbox " + JSON.stringify(wb.items.get("g").bbox)); break; }
+        }
+      }
+      check("random graph lessons (" + lessons + "): after every turn, no stroke of any label, curve, point or text is too close to another element's", failures.length === 0, failures.slice(0, 4).join(" || "));
+      check("random graph lessons: the audit looked at real strokes", totalChecked > 1000, "checked " + totalChecked);
+    }
 
     /* 8e. PENCIL VS VOICE: the pencil's real duration is measured against the voice, whatever the subject */
     const deriv = F.derivative.turns;

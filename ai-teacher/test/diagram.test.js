@@ -221,3 +221,40 @@ test("layout is deterministic", () => {
   const s = spec("cycle", ["Sun", "Ocean", "Cloud", "Rain"], ["circle", "box"], ["heats", "rises", ""]);
   assert.equal(JSON.stringify([...D.layoutDiagram(s, measure).nodes.values()]), JSON.stringify([...D.layoutDiagram(s, measure).nodes.values()]));
 });
+
+/* ---------- placing labels by their real strokes ---------- */
+
+test("segmentDistance and inkGap measure real distances between strokes", () => {
+  assert.equal(D.segmentDistance([0, 0], [10, 0], [5, -5], [5, 5]), 0, "crossing segments touch");
+  assert.equal(D.segmentDistance([0, 0], [10, 0], [0, 7], [10, 7]), 7, "parallel segments");
+  assert.ok(Math.abs(D.segmentDistance([0, 0], [10, 0], [13, 4], [20, 4]) - 5) < 1e-9, "end to end");
+  assert.equal(D.inkGap([[[0, 0], [10, 0]]], [[[0, 30], [10, 30]]], 12), 12, "farther than the limit reports the limit");
+  assert.equal(D.inkGap([[[0, 0], [10, 0]]], [[[0, 4], [10, 4]]], 12), 4);
+});
+
+test("placeInk keeps every letter stroke clear of axes, numbers, curves and earlier labels, and uses the gutter when the plot is crowded", () => {
+  const typeset = (t, maxWidth) => hand.typesetText(t, { size: 28, maxWidth, seed: t });
+  const label = (t, maxWidth) => { const r = typeset(t, maxWidth); return { w: r.width, h: r.height, strokes: r.strokes }; };
+  // a crowded plot: an axis cross, a diagonal curve and a few earlier labels
+  const lines = [[[40, 150], [300, 150]], [[120, 280], [120, 10]], [[40, 280], [300, 20]]];
+  const first = label("derivative: slope 2x", 150), second = label("tangent at x = 1", 150);
+  const regions = [{ x: 58, y: 24, w: 247, h: 235 }, { x: 320, y: 4, w: 190, h: 290 }];
+  const obstacles = { ink: [...lines], rects: [] };
+  const placed = [];
+  for (const [i, l] of [first, second, label("vertex"), label("(1, 1)")].entries()) {
+    const spot = D.placeInk([200, 100], l, obstacles, regions, { gap: 12, pad: 9 });
+    assert.ok(spot.ok, "label " + i + " has a clear place");
+    const moved = l.strokes.map((poly) => poly.map(([x, y]) => [x + spot.x, y + spot.y]));
+    assert.ok(D.inkGap(moved, obstacles.ink, 20) >= 9 - 1e-9, "label " + i + " is at least 9 units from every stroke already there");
+    assert.ok(spot.x >= 58 - 1e-6 && spot.y >= 4 - 1e-6 && spot.x + l.w <= 510 + 1e-6, "label " + i + " is inside its regions");
+    obstacles.ink.push(...moved); placed.push(spot);
+  }
+  assert.equal(placed.length, 4);
+});
+
+test("placeInk reports (ok false) when nothing is clear instead of drawing over something", () => {
+  const l = (() => { const r = hand.typesetText("a label", { size: 28 }); return { w: r.width, h: r.height, strokes: r.strokes }; })();
+  const wall = []; for (let y = 0; y <= 200; y += 6) wall.push([[0, y], [200, y]]); // ink everywhere
+  const spot = D.placeInk([100, 100], l, { ink: wall, rects: [] }, [{ x: 10, y: 10, w: 180, h: 180 }], { gap: 12, pad: 9 });
+  assert.equal(spot.ok, false);
+});

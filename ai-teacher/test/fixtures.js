@@ -142,6 +142,32 @@
     ] }],
   };
 
+  /**
+   * The lesson of a real screenshot: a parabola with its vertex, then a tangent line (an orange label) and the derivative
+   * (a blue label and blue explanation) added in LATER turns, with explanations written beside and below the graph.
+   * Everything is planned separately, so only the finished composition shows whether it collides.
+   */
+  const tangentLesson = {
+    subject: "tangent and derivative (screenshot)",
+    turns: [
+      { teacher: "Here is the parabola y equals x squared, with its vertex at the bottom.", ops: [
+        { op: "graph", id: "tg", w: 420, h: 300, xmin: -3, xmax: 3, ymin: -1, ymax: 9, xlabel: "x", ylabel: "y", cue: "the parabola" },
+        { op: "plot", graph: "tg", fn: "x^2", color: "blue", label: "y = x²", id: "tcurve", cue: "y equals x squared" },
+        { op: "point", graph: "tg", px: 0, py: 0, label: "vertex", color: "red", id: "tvertex", cue: "its vertex" },
+      ] },
+      { teacher: "Now the tangent line at x equals one touches the curve at one point. Its slope is the derivative, two x, which is two there.", ops: [
+        { op: "plot", graph: "tg", fn: "2*x-1", color: "amber", label: "tangent at x = 1", id: "ttangent", cue: "the tangent line" },
+        { op: "point", graph: "tg", px: 1, py: 1, label: "(1, 1)", color: "amber", id: "ttouch", cue: "one point" },
+        { op: "write", kind: "text", content: "The derivative is the slope of the tangent line", color: "blue", id: "texplain", near: "tg", side: "right", cue: "Its slope is the derivative" },
+        { op: "write", kind: "math", content: "f'(x) = 2x", color: "blue", id: "tderiv", near: "texplain", side: "below", cue: "two x" },
+      ] },
+      { teacher: "If we plot the derivative itself, it is a straight line through the origin with slope two.", ops: [
+        { op: "plot", graph: "tg", fn: "2*x", color: "blue", label: "derivative: slope 2x", id: "tdline", cue: "plot the derivative" },
+        { op: "write", kind: "text", content: "At x = 1 the slope is 2", color: "amber", id: "tslope", near: "tg", side: "below", cue: "slope two" },
+      ] },
+    ],
+  };
+
   /** Pointing at something that is already on the board, at the moment the teacher refers to it. (Needs the maths lesson first.) */
   const pointAndExplain = {
     subject: "point and explain",
@@ -272,5 +298,5 @@
     };
   }
 
-  return { mathematics, biology, history, topicChange, revisit, sentences, speakOnly, writeWhileSaying, graphWithReference, pointAndExplain, question, questionAfterDrawing, rhetorical, derivative, missingReference, handwriting, longLesson, longDiagrams, all: [mathematics, biology, history, topicChange, handwriting] };
+  return { mathematics, biology, history, topicChange, revisit, sentences, speakOnly, writeWhileSaying, graphWithReference, tangentLesson, pointAndExplain, question, questionAfterDrawing, rhetorical, derivative, missingReference, handwriting, longLesson, longDiagrams, all: [mathematics, biology, history, topicChange, handwriting] };
 });

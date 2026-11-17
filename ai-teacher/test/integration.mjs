@@ -26,7 +26,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const [math, biology, history, topic] = fixtures.all;
 const elephantTurn = { teacher: "Now look at the purple elephant over there.", ops: [{ op: "write", kind: "text", size: "body", content: "elephant", id: "el", cue: "purple elephant" }] };
 const toolRequestOps = [{ op: "write", kind: "text", size: "title", content: "Triangles", id: "tri-title" }, { op: "shape", shape: "polygon", points: [[300, 420], [500, 220], [700, 420]], color: "blue", id: "tri" }, { op: "write", kind: "text", size: "small", content: "three sides", x: 420, y: 450, id: "tri-label" }];
-const turnsByText = [...fixtures.all.flatMap((l) => l.turns), ...fixtures.revisit.turns, ...fixtures.sentences.turns, ...fixtures.speakOnly.turns, ...fixtures.graphWithReference.turns, ...fixtures.pointAndExplain.turns, ...fixtures.question.turns, ...fixtures.questionAfterDrawing.turns, ...fixtures.missingReference.turns, ...fixtures.longLesson(10).turns, elephantTurn];
+const turnsByText = [...fixtures.all.flatMap((l) => l.turns), ...fixtures.revisit.turns, ...fixtures.sentences.turns, ...fixtures.speakOnly.turns, ...fixtures.graphWithReference.turns, ...fixtures.tangentLesson.turns, ...fixtures.pointAndExplain.turns, ...fixtures.question.turns, ...fixtures.questionAfterDrawing.turns, ...fixtures.missingReference.turns, ...fixtures.longLesson(10).turns, elephantTurn];
 const service = { delayMs: 0, plannerStatus: 200, planner: [], classic: [] }; // what the page asked for is logged here
 
 const elevenLabsStub = `export const Conversation = { async startSession(opts){ window.__opts = opts;
@@ -448,6 +448,79 @@ try {
   await page(`__opts.onAudioAlignmentPlayback({ event_id: 3, alignment: { chars: ${JSON.stringify(Array.from(sentenceChunks[2]))} } }); __opts.onAudioAlignmentPlayback({ event_id: 1, alignment: { chars: ${JSON.stringify(Array.from(sentenceChunks[0]))} } }); __opts.onAudioAlignmentPlayback({ event_id: 2, alignment: { chars: ${JSON.stringify(Array.from(sentenceChunks[1]))} } }); true`);
   check("audio events out of order: the page puts them back in order", (await page("window.__wb.clock.chars.join('')")) === sentenceChunks.join(""), await page("window.__wb.clock.chars.join('')"));
   await settled(2500);
+
+  // 6g2. THE SCREENSHOT LESSON on the real page: a tangent and a derivative planned in separate turns; real strokes are audited
+  await page("window.__wb.timeScale = 6; true");
+  for (const turn of fixtures.tangentLesson.turns) {
+    await hear("Continue with the tangent."); const before = service.planner.length;
+    await speak(turn.teacher); await waitFor(() => service.planner.length > before, "planner asked (tangent lesson)", 15000); await settled(1800);
+  }
+  const tangentAudit = await page("(() => { const r = window.__wb.audit(); return { problems: r.problems, checked: r.checked }; })()");
+  check("tangent lesson on the real page: the orange tangent label, the blue derivative text and the vertex label are clear of axes, numbers, curves and each other (" + tangentAudit.checked + " strokes measured)", tangentAudit.problems.length === 0, tangentAudit.problems.slice(0, 4).join(" | "));
+  await page("window.__wb.viewPage(window.__wb.pages.findIndex((p) => p.ids.has('tg')) + 1); true");
+  await shoot("live_tangent_lesson");
+  await sleep(600);
+  check("tangent lesson: the page's own overlap check ran after drawing and found nothing to report", !(await events("engine")).some((m) => m.startsWith("Overlap check")), JSON.stringify((await events("engine")).filter((m) => m.startsWith("Overlap check")).slice(0, 2)));
+
+  // 6h. CONVERSATION LATENCY INSTRUMENTATION on the real page, and: the whiteboard never blocks the voice conversation
+  await page("document.getElementById('timing').open = true; true");
+  const voiceUtterance = async (talkMs, transcriptDelayMs) => { // the student talks (voice-activity scores every 100 ms), stops, and the transcript arrives later
+    for (let t = 0; t < talkMs; t += 100) { await page("__opts.onVadScore({ vadScore: 0.9 }); true"); await sleep(100); }
+    for (let t = 0; t < 700; t += 100) { await page("__opts.onVadScore({ vadScore: 0.04 }); true"); await sleep(100); }
+    await sleep(transcriptDelayMs);
+  };
+  const timing = () => page("(() => { const r = window.__timing.report(); return { rows: Object.fromEntries(r.rows.map((x) => [x.key, x.ms])), verdict: r.verdict.text, plannerCalls: r.plannerCalls, plannerSkipped: r.plannerSkipped, unavailable: r.unavailable.length }; })()");
+  const turnText = fixtures.graphWithReference.turns[0].teacher;
+  const alignmentOf = (text) => `__opts.onAudioAlignmentPlayback({ event_id: 1, alignment: { chars: ${JSON.stringify(Array.from(text))} } });`;
+  // (a) a normal turn: every part is measured on the page's own clock, and what the SDK does not report is listed as unavailable
+  await settled(1500);
+  await voiceUtterance(800, 300);                                    // stops speaking, ~300 ms of waiting before the transcript below
+  await page(`__opts.onMessage({ source: 'user', message: 'Can you show the parabola?' }); true`);
+  await sleep(500);
+  await page(`__opts.onAudio('AAAA'); true`); await sleep(100);       // first teacher audio data
+  await speak(turnText); await sleep(120);                            // the speaking mode and the text
+  await page(`${alignmentOf(turnText.slice(0, 30))} true`);           // the exact playback event
+  await sleep(300);
+  let t = await timing();
+  check("latency (a): the stop of the student's speech is found from the voice-activity scores and the transcript delay is measured", t.rows.stopToTranscript >= 650 && t.rows.stopToTranscript <= 2000, JSON.stringify(t.rows) + " TURNS " + await page("JSON.stringify(window.__timing.turns.map((x) => [x.kind, x.marks]))"));
+  check("latency (a): teacher text, first audio and audible are each timed from the transcript", t.rows.transcriptToText >= 400 && t.rows.transcriptToAudioChunk >= 400 && t.rows.chunkToAudible >= 0 && t.rows.stopToAudible > t.rows.stopToTranscript, JSON.stringify(t.rows));
+  check("latency (a): the diagnostic names the largest measured part, and lists what the SDK does not report", t.verdict.startsWith("largest part") && t.unavailable === 2, t.verdict);
+  const shown = await page("document.getElementById('timingBody').textContent");
+  check("latency (a): the panel shows the numbers and 'unavailable' for what is not reported, and no speech text or key", shown.includes("ms") && shown.includes("Not reported by the SDK") && !shown.includes("parabola") && !shown.includes("sk-ant"), shown.slice(0, 300));
+  // (b) a SLOW planner: the voice events are handled at once, and the planner's own delay is reported as the planner's
+  await settled(2500);
+  service.delayMs = 3000;
+  await page("window.__wb.timeScale = 2; true");
+  await voiceUtterance(500, 100);
+  await page(`__opts.onMessage({ source: 'user', message: 'And the vertex?' }); true`);
+  const plannerBefore = service.planner.length;
+  await page(`__opts.onModeChange({ mode: 'listening' }); true`);
+  const handlerMs = await page(`(() => { const t0 = performance.now(); __opts.onModeChange({ mode: 'speaking' }); __opts.onMessage({ source: 'ai', message: ${JSON.stringify(turnText)} }); __opts.onAudioAlignmentPlayback({ event_id: 1, alignment: { chars: ${JSON.stringify(Array.from(turnText.slice(0, 20)))} } }); return performance.now() - t0; })()`);
+  check("never blocks the voice: the voice events are processed in a few milliseconds while the planner is still waiting", handlerMs < 60 && service.planner.length === plannerBefore, handlerMs + " ms");
+  await sleep(600);
+  t = await timing();
+  check("slow planner: the voice is heard long before the planner answers (the planner is not on the voice's path)", t.rows.stopToAudible !== null && t.rows.stopToAudible < 2500, JSON.stringify(t.rows));
+  await waitFor(() => service.planner.length > plannerBefore, "slow planner asked", 10000);
+  await waitFor(async () => (await timing()).rows.plannerLatency !== null, "planner answer measured", 20000);
+  t = await timing();
+  check("slow planner: its own delay is measured as the planner's (about 3 s), separately from the voice", t.rows.plannerLatency >= 2800 && t.rows.plannerLatency < 9000, JSON.stringify(t.rows));
+  service.delayMs = 0;
+  // (c) a slow TRANSCRIPTION is blamed on speech-to-text and turn-taking, not on the whiteboard
+  await settled(3000);
+  await voiceUtterance(500, 2600);
+  await page(`__opts.onMessage({ source: 'user', message: 'Why is it a parabola?' }); true`);
+  await sleep(250); await page(`__opts.onAudio('AAAA'); true`); await sleep(100); await speak("Because the square makes both sides rise."); await page(`${alignmentOf("Because the square")} true`);
+  t = await timing();
+  check("slow transcription: the largest part is the stop-to-transcript delay, and it is not blamed on the whiteboard", t.verdict.includes("speech-to-text") && t.rows.stopToTranscript >= 3000, t.verdict + " " + JSON.stringify(t.rows));
+  // (d) tiny acknowledgements get no planner call; an identical repeated message is not planned twice
+  await settled(3000);
+  let plannerCount = service.planner.length;
+  await hear("Okay."); await speak("Great!"); await sleep(600);
+  check("efficiency: a short acknowledgement is not sent to the planner", service.planner.length === plannerCount && (await timing()).plannerSkipped >= 1 && (await events("turn")).some((m) => m.includes("nothing to draw, so no planner call")), JSON.stringify(await timing()));
+  await hear("Show me the curve again."); await speak(turnText); await sleep(400); plannerCount = service.planner.length;
+  await page(`__opts.onMessage({ source: 'ai', message: ${JSON.stringify(turnText)} }); true`); await sleep(500);
+  check("efficiency: the same teacher message arriving twice is planned once", service.planner.length === plannerCount && (await events("turn")).some((m) => m.includes("arrived again")), String(service.planner.length - plannerCount));
+  await settled(3000);
 
   // 7. THE AGENT'S show_on_board TOOL: in Animated mode its finished HTML must not appear at once.
   await hear("Can you show me a triangle?");

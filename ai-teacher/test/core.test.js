@@ -698,3 +698,111 @@ test("agent notes: the board status lists what is written; the style note never 
   assert.ok(/one step at a time/i.test(core.TEACHING_STYLE_NOTE) && /do not slow your voice/i.test(core.TEACHING_STYLE_NOTE));
   assert.ok(!/pause (your|the) voice/i.test(core.TEACHING_STYLE_NOTE));
 });
+
+/* ---------- conversation latency timeline ---------- */
+
+/** Play a student's utterance through the VAD (a score every 100 ms) and then the rest of a simulated turn. */
+function simulateTurn(timer, t0, o) {
+  const talkMs = o.talkMs || 2000;
+  for (let t = 0; t <= talkMs; t += 100) timer.vad(0.9, t0 + t);
+  for (let t = talkMs + 100; t <= talkMs + 600; t += 100) timer.vad(0.05, t0 + t);
+  const stop = t0 + talkMs;
+  if (o.transcriptMs != null) timer.mark("transcript", stop + o.transcriptMs);
+  if (o.textMs != null) timer.mark("agentText", stop + o.textMs, "streamed text");
+  if (o.chunkMs != null) timer.mark("audioChunk", stop + o.chunkMs);
+  if (o.audibleMs != null) timer.mark("audible", stop + o.audibleMs, "alignment playback");
+  return stop;
+}
+
+test("timeline: a normal turn is split into measured parts and the biggest is named", () => {
+  const timer = new core.TurnTimer();
+  simulateTurn(timer, 1000, { transcriptMs: 900, textMs: 1500, chunkMs: 1700, audibleMs: 1800 });
+  const report = timer.report();
+  const row = (key) => report.rows.find((r) => r.key === key);
+  assert.equal(row("stopToAudible").ms, 1800);
+  assert.equal(row("stopToTranscript").ms, 900);
+  assert.equal(row("transcriptToText").ms, 600);
+  assert.equal(row("transcriptToAudioChunk").ms, 800);
+  assert.equal(row("chunkToAudible").ms, 100);
+  assert.ok(report.verdict.text.includes("speech-to-text") && report.verdict.text.includes("900 ms"), report.verdict.text);
+  assert.ok(report.unavailable.length === 2, "what the SDK does not expose is listed, not guessed");
+});
+
+test("timeline: slow transcription, a slow agent LLM and slow playback each point at the right part", () => {
+  let timer = new core.TurnTimer(); simulateTurn(timer, 0, { transcriptMs: 3200, chunkMs: 3900, audibleMs: 4000 });
+  assert.ok(timer.report().verdict.text.includes("speech-to-text"), "delayed transcription: " + timer.report().verdict.text);
+  timer = new core.TurnTimer(); simulateTurn(timer, 0, { transcriptMs: 600, chunkMs: 4600, audibleMs: 4700 });
+  assert.ok(timer.report().verdict.text.includes("LLM and voice generation"), "slow agent: " + timer.report().verdict.text);
+  timer = new core.TurnTimer(); simulateTurn(timer, 0, { transcriptMs: 600, chunkMs: 1200, audibleMs: 3800 });
+  assert.ok(timer.report().verdict.text.includes("playback"), "slow playback: " + timer.report().verdict.text);
+});
+
+test("timeline: an event the SDK does not give is unavailable, never guessed", () => {
+  const timer = new core.TurnTimer();
+  timer.mark("transcript", 1000); timer.mark("agentText", 1800); timer.mark("audible", 2400); // no voice-activity scores, no audio chunks (WebRTC)
+  const report = timer.report(), row = (key) => report.rows.find((r) => r.key === key);
+  assert.equal(row("stopToAudible").ms, null);
+  assert.ok(row("stopToAudible").note.includes("voice-activity"));
+  assert.equal(row("transcriptToAudioChunk").ms, null);
+  assert.ok(report.verdict.text.includes("together"), "without chunk events the parts are reported together: " + report.verdict.text);
+  assert.equal(row("transcriptToText").ms, 800);
+});
+
+test("timeline: typed messages count from the send; each audible reply closes a turn and the next speech opens a new one", () => {
+  const timer = new core.TurnTimer();
+  timer.mark("typed", 100); timer.mark("agentText", 900); timer.mark("audible", 1300);
+  assert.equal(timer.report().rows[0].ms, 1200);
+  simulateTurn(timer, 5000, { transcriptMs: 700, audibleMs: 1500 });
+  simulateTurn(timer, 12000, { transcriptMs: 700, audibleMs: 1700 }); // a second spoken turn, even a barge-in over the teacher
+  assert.equal(timer.turns.length, 3);
+  assert.deepEqual(timer.turns.map((t) => t.kind), ["typed", "voice", "voice"]);
+  assert.equal(timer.median("stopToAudible"), 1500);
+});
+
+test("timeline: planner and pencil rows, planner calls, and session updates sent in the waiting window are reported", () => {
+  const timer = new core.TurnTimer();
+  const stop = simulateTurn(timer, 0, { transcriptMs: 800, textMs: 1400, chunkMs: 1800, audibleMs: 1900 });
+  timer.hint("board status", stop + 1200); // a context update sent while the teacher was being generated
+  timer.mark("plannerRequest", stop + 1500); timer.count("plannerCalls"); timer.mark("plannerFirstOp", stop + 3300); timer.mark("penStart", stop + 4100);
+  const report = timer.report(), row = (key) => report.rows.find((r) => r.key === key);
+  assert.equal(row("textToPlannerRequest").ms, 100);
+  assert.equal(row("plannerLatency").ms, 1800);
+  assert.equal(row("audibleToPen").ms, 2200);
+  assert.equal(report.plannerCalls, 1);
+  assert.equal(report.verdict.competingHints, 1);
+  assert.ok(report.verdict.text.includes("context update"));
+});
+
+test("timeline: the student speaking again within the hold time is one utterance, and a pause longer than it is not", () => {
+  const timer = new core.TurnTimer({ vadHoldMs: 400 });
+  for (let t = 0; t <= 1000; t += 100) timer.vad(0.9, t);
+  for (let t = 1100; t <= 1300; t += 100) timer.vad(0.1, t); // a 300 ms breath: still speaking
+  for (let t = 1400; t <= 2000; t += 100) timer.vad(0.9, t);
+  for (let t = 2100; t <= 2700; t += 100) timer.vad(0.1, t);
+  assert.equal(timer.current.marks.studentStart, 0);
+  assert.equal(timer.current.marks.studentStop, 2000, "the stop is the last voiced moment");
+});
+
+test("timeline: the exact playback event replaces the speaking-mode guess once, and later sentences do not change it", () => {
+  const timer = new core.TurnTimer();
+  simulateTurn(timer, 0, { transcriptMs: 500 });
+  timer.audible(2900, "speaking mode"); timer.audible(3050, "audio playback event"); timer.audible(9000, "audio playback event");
+  assert.equal(timer.current.marks.audible, 3050);
+  assert.equal(timer.current.detail.audible, "audio playback event");
+});
+
+test("worthPlanning: acknowledgements are not sent to the planner; content, maths and short requests to show something are", () => {
+  for (const ack of ["Great!", "Okay, go on.", "Good job.", "Yes, exactly.", "Got it.", "", "Thank you!"]) assert.equal(core.worthPlanning(ack), false, ack);
+  for (const real of ["Now we write x squared.", "Two plus two is four.", "Well done, that is right today.", "Let's draw it.", "Here's the triangle.", "Yes, that is 4", "Look at the vertex."]) assert.equal(core.worthPlanning(real), true, real);
+});
+
+test("timeline: events that arrive out of order are unavailable, never negative, and a score that never falls does not stay 'speaking' for ever", () => {
+  const timer = new core.TurnTimer();
+  simulateTurn(timer, 0, { transcriptMs: 500 });
+  timer.mark("audible", 1000); // before the student's stop (2000): out of order
+  assert.equal(timer.report().rows.find((r) => r.key === "stopToAudible").ms, null);
+  const echo = new core.TurnTimer();
+  for (let t = 0; t <= 70000; t += 100) echo.vad(0.9, t); // the teacher's own voice leaking into the microphone
+  assert.equal(echo.speaking, false, "after 60 s it is treated as stuck");
+});
+
