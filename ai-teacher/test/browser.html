@@ -492,6 +492,20 @@ async function runSelfTest() {
     check("ink audit: a point's dot counts as ink (handwriting across the dot is reported)", wb.audit().problems.some((m) => m.includes("dotprobe") && m.includes("dot")), wb.audit().problems.join(" | "));
     wb.removeItem("dotprobe");
 
+    /* 9d. The lesson's own composition check stays cheap in a long lesson: only changed pages, never while the voice is busy */
+    wb = fresh({ timeScale: 80 });
+    const auditCalls = [], realAudit = wb.audit.bind(wb); wb.audit = (o) => { auditCalls.push(o && o.pages ? o.pages.slice() : "all"); return realAudit(o); };
+    let voiceBusy = true; wb.busy = () => voiceBusy;
+    await playLesson(wb, F.longLesson(24));
+    await sleep(800);
+    check("composition check: it waits while the voice conversation is busy (nothing is measured, pages stay marked as changed)", wb.pages.some((p) => p.dirty) && auditCalls.length === 0, "dirty pages " + wb.pages.filter((p) => p.dirty).length + ", audits " + auditCalls.length);
+    voiceBusy = false; await sleep(1500);
+    check("composition check: once the voice is quiet it measures only the pages that changed, then marks them clean", wb.pages.every((p) => !p.dirty) && auditCalls.length >= 1 && auditCalls.every((pages) => pages !== "all" && pages.length <= wb.pages.length), JSON.stringify(auditCalls).slice(0, 160));
+    const callsBefore = auditCalls.length; wb.enqueue(ops([{ op: "write", kind: "text", content: "One more line", id: "extra1" }], wb)); await wb.idle(); await sleep(2500);
+    const lastCall = auditCalls.at(-1);
+    check("composition check: after one more line only that page is measured again, so the cost does not grow with the lesson (" + wb.pages.length + " pages)", auditCalls.length > callsBefore && Array.isArray(lastCall) && lastCall.length === 1, JSON.stringify(auditCalls.slice(callsBefore)));
+    check("composition check: the state kept by a long lesson is bounded (moments, timeline, gates)", wb.moments.length <= 200 && wb.timeline.length <= 200 && wb.gates.length <= 100, JSON.stringify([wb.moments.length, wb.timeline.length, wb.gates.length]));
+
     /* 9a. The same stroke audit on every simulated lesson (all subjects, diagrams, long lessons) */
     for (const [name, lesson] of [["mathematics", F.mathematics], ["biology", F.biology], ["history", F.history], ["topic change", F.topicChange], ["handwriting showcase", F.handwriting], ["long lesson", F.longLesson(10)], ["long diagrams", F.longDiagrams(8)], ["derivative", F.derivative]]) {
       wb = fresh({ timeScale: 80 });

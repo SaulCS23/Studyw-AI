@@ -141,6 +141,7 @@
       this.gates = [];
       this.waiting = false;          // the teacher asked the student something: nothing more is drawn until the student answers
       this.moments = [];             // teaching moments the planner has marked, for diagnostics and tests
+      this.busy = options.busy || null; this.checkNotBefore = 0; this.checkCostMs = 0; // busy(): true while the voice conversation is active
       this.compositionProblems = []; this.checkTimer = null; // the last stroke-level overlap check (see audit)
       this.timeline = [];            // when each step was released, started and finished (ms on this.now()), for measuring sync
       this.syncStats = { released: {}, refs: 0, lateRefs: 0, worstLateMs: 0 };
@@ -293,8 +294,9 @@
       const ctm = this.svg.getScreenCTM && this.svg.getScreenCTM();
       if (!ctm) return { problems: [], checked: 0, unavailable: true }; // not displayed: nothing can be measured (and nothing is reported)
       const toBoard = ctm.inverse(), TEXTISH = new Set(["text", "tick", "axisname", "label"]);
-      const inks = [];
+      const inks = [], wanted = options && options.pages ? new Set(options.pages) : null; // by default every page; the lesson's own check measures only what changed
       for (const page of this.pages) {
+        if (wanted && !wanted.has(page.id)) continue;
         for (const el of page.g.querySelectorAll("path, circle")) {
           if (el.closest("[data-wb-pointer]") || el.closest("clipPath") || el.style.visibility === "hidden" || el.style.opacity === "0") continue;
           const owner = el.closest("[data-wb-id]"); if (!owner) continue;
@@ -356,16 +358,25 @@
      */
     scheduleCompositionCheck() {
       if (this.checkTimer || typeof getComputedStyle !== "function") return;
+      const wait = Math.max(250, (this.checkNotBefore || 0) - performance.now());
       this.checkTimer = setTimeout(() => {
         this.checkTimer = null;
         if (this.running || this.queue.length) return;
+        if (this.busy && this.busy()) { this.scheduleCompositionCheck(); return; } // never while the student is talking or the teacher is speaking
+        const dirty = this.pages.filter((p) => p.dirty); if (!dirty.length) return;
         try {
-          const result = this.audit(); this.compositionProblems = result.problems;
+          // Only the pages that changed, so the cost does not grow with the length of the lesson (it used to measure every
+          // page after every turn: 300 ms of blocked page by turn 60). A slow check backs off, and never runs twice in a row.
+          const started = performance.now();
+          const result = this.audit({ pages: dirty.map((p) => p.id) });
+          if (result.unavailable) return; // the board is not displayed: the pages stay marked and are measured when it is
+          dirty.forEach((p) => { p.dirty = false; }); this.compositionProblems = result.problems;
+          this.checkCostMs = performance.now() - started; this.checkNotBefore = performance.now() + this.checkCostMs * 20;
           const summary = result.problems.join("|");
           if (result.problems.length && summary !== this.lastCompositionLog) this.log("warn", `Overlap check: ${result.problems.length} place(s) where handwriting is closer than 5 units to something else: ${result.problems.slice(0, 3).join("; ")}`);
           this.lastCompositionLog = summary; // (the same report is not repeated after every pause)
         } catch (error) { /* a measurement problem must never disturb the lesson */ }
-      }, 250);
+      }, wait);
     }
 
     /* ----- Pages ----- */
@@ -657,6 +668,7 @@
     createItem(id, type, page, parent) {
       const g = svgEl("g", { "data-wb-id": id, "data-wb-type": type }, parent ? parent.g : page.g);
       const item = { id, type, g, page, parent: parent || null, children: new Set(), bbox: null, text: "", marker: null, calc: null };
+      page.dirty = true; // something new on this page: its composition is checked again once the pencil rests
       this.items.set(id, item);
       page.ids.add(id);
       if (parent) parent.children.add(id);
@@ -669,7 +681,7 @@
       for (const childId of [...item.children]) this.removeItem(childId);
       if (item.marker) item.marker.remove();
       item.g.remove();
-      item.page.ids.delete(id);
+      item.page.ids.delete(id); item.page.dirty = true; // what is left on this page is checked again
       item.page.layout.release(id);
       for (const [name, anchor] of this.calcAnchors) if (anchor.itemId === id) this.calcAnchors.delete(name); // the line the equals signs were aligned to is gone
       if (item.parent) { item.parent.children.delete(id); if (item.parent.labels) item.parent.labels.release(id); } // a diagram label frees its place in the diagram
@@ -1196,7 +1208,7 @@
      * student. "wait" is a barrier: the teacher has asked something, so nothing more is drawn until the student answers.
      */
     async runMoment(op) {
-      this.moments.push({ kind: op.kind, note: op.note || "", at: this.now() });
+      this.moments.push({ kind: op.kind, note: op.note || "", at: this.now() }); if (this.moments.length > 200) this.moments.shift();
       if (this.onMoment) this.onMoment({ kind: op.kind, note: op.note || "" });
       if (op.kind === "wait") { this.waiting = true; const dropped = this.queue.filter((e) => e.generation === this.generation).length; this.queue.length = 0; if (dropped) this.log("info", `The teacher asked a question: ${dropped} queued step(s) after it were dropped.`); }
     }

@@ -837,6 +837,87 @@
     return "Board status: " + (items.length ? "written so far: " + items.join(", ") + "." : "nothing written yet.") + lag;
   }
 
+  /* ---------- Long-session health: which layer has gone quiet? (pure: time is passed in) ---------- */
+
+  /**
+   * Watches the signals the SDK gives about a running conversation and says, in plain words and by layer, what looks
+   * wrong: the connection, the microphone, voice-activity updates, transcription, the agent's answer, audio playback, the
+   * page itself. It only reports what it measured and never claims the microphone works. It keeps a ring of numeric
+   * samples (no speech, no text) so a long lesson can be inspected afterwards.
+   */
+  class SessionHealth {
+    constructor(options) {
+      const o = options || {};
+      this.vadSilenceMs = o.vadSilenceMs || 6000;         // no voice-activity update for this long, after they had been arriving
+      this.transcriptStallMs = o.transcriptStallMs || 8000; // spoke, stopped, and no transcript for this long
+      this.answerStallMs = o.answerStallMs || 15000;      // transcript received, and no teacher text or audio for this long
+      this.audioStallMs = o.audioStallMs || 10000;        // teacher text received, and still no audio for this long
+      this.zeroMicMs = o.zeroMicMs || 45000;              // input level exactly zero for this long
+      this.hiddenMs = o.hiddenMs || 3000;
+      this.jankMs = o.jankMs || 500;
+      this.maxSamples = o.maxSamples || 240;
+      this.startedAt = null; this.connected = false; this.everConnected = false; this.closedReason = null; this.closedAt = null;
+      this.mode = "idle"; this.lastVadAt = null; this.vadSeen = false; this.voicedSince = null; this.lastVoicedAt = null; this.heardAt = null; this.heardMs = 0;
+      this.transcriptAt = null; this.textAt = null; this.audibleAt = null; this.studentTurns = 0; this.hidden = false; this.hiddenAt = null;
+      this.micLast = null; this.micZeroSince = null; this.micSeen = false; this.deviceChanges = []; this.lagMs = 0; this.lagAt = null;
+      this.vadWhileTeacher = 0; this.teacherVadChecks = 0; this.samples = [];
+    }
+    open(now) { // a new session: nothing from the old one may raise an alarm in it
+      this.startedAt = this.startedAt == null ? now : this.startedAt; this.connected = true; this.everConnected = true; this.closedReason = null; this.closedAt = null;
+      this.lastVadAt = null; this.vadSeen = false; this.voicedSince = null; this.lastVoicedAt = null; this.heardAt = null; this.heardMs = 0; this.transcriptAt = null; this.textAt = null; this.audibleAt = null;
+      this.micLast = null; this.micZeroSince = null; this.micSeen = false; this.vadWhileTeacher = 0; this.teacherVadChecks = 0; this.lagAt = null; this.mode = "listening";
+    }
+    close(now, reason) { this.connected = false; this.closedAt = now; this.closedReason = reason || "closed"; this.mode = "idle"; }
+    setMode(mode, now) { this.mode = mode; }
+    vad(score, now) {
+      this.lastVadAt = now; this.vadSeen = true;
+      if (this.mode === "speaking") { this.teacherVadChecks++; if (score >= 0.5) this.vadWhileTeacher++; if (this.teacherVadChecks >= 400) { this.teacherVadChecks = Math.round(this.teacherVadChecks / 2); this.vadWhileTeacher = Math.round(this.vadWhileTeacher / 2); } } // recent behaviour counts, not the whole lesson
+      if (score >= 0.5) { if (this.voicedSince === null) this.voicedSince = now; this.lastVoicedAt = now; }
+      else if (this.voicedSince !== null && this.lastVoicedAt !== null && now - this.lastVoicedAt >= 400) { // the student stopped
+        if (this.lastVoicedAt - this.voicedSince >= 700 && this.mode !== "speaking") { this.heardAt = this.lastVoicedAt; this.heardMs = this.lastVoicedAt - this.voicedSince; this.studentTurns++; }
+        this.voicedSince = null;
+      }
+    }
+    transcript(now) { this.transcriptAt = now; this.heardAt = null; this.textAt = null; this.audibleAt = null; }
+    agentText(now) { if (this.textAt === null || this.textAt < (this.transcriptAt || 0)) this.textAt = now; }
+    audible(now) { this.audibleAt = now; }
+    visibility(hidden, now) { this.hidden = hidden; this.hiddenAt = hidden ? now : null; }
+    deviceChange(now) { this.deviceChanges.push(now); if (this.deviceChanges.length > 20) this.deviceChanges.shift(); }
+    mic(volume, now) { // the SDK's input level, if it has one; exactly zero for a long time means no signal at all
+      if (!Number.isFinite(volume)) return; this.micSeen = true; this.micLast = volume;
+      if (volume === 0) { if (this.micZeroSince === null) this.micZeroSince = now; } else this.micZeroSince = null;
+    }
+    jank(lagMs, now) { this.lagMs = lagMs; this.lagAt = now; }
+
+    /** What looks wrong right now: [{ id, level, layer, message }], most important first. */
+    diagnose(now) {
+      const out = [], sec = (ms) => Math.round(ms / 1000);
+      if (!this.connected) {
+        if (this.everConnected) out.push({ id: "connection", level: "error", layer: "connection", message: "The connection to ElevenLabs closed" + (this.closedAt != null ? " " + sec(now - this.closedAt) + " s ago" : "") + " (" + this.closedReason + "). The board and your notes are kept; reconnect to continue." });
+        return out;
+      }
+      if (this.hidden && this.hiddenAt !== null && now - this.hiddenAt >= this.hiddenMs) out.push({ id: "hidden", level: "warn", layer: "browser", message: "This tab has been in the background for " + sec(now - this.hiddenAt) + " s. Browsers throttle timers and can suspend audio in background tabs, which delays or drops what the teacher hears." });
+      if (this.vadSeen && this.lastVadAt !== null && now - this.lastVadAt >= this.vadSilenceMs && !this.hidden) out.push({ id: "vad", level: "warn", layer: "microphone / voice activity", message: "No voice-activity updates from ElevenLabs for " + sec(now - this.lastVadAt) + " s, although they were arriving earlier. The microphone may be muted or disconnected, the browser may have suspended audio, or the connection has stalled. If you are speaking now, the teacher is not hearing you." });
+      if (this.micSeen && this.micZeroSince !== null && now - this.micZeroSince >= this.zeroMicMs) out.push({ id: "mic-zero", level: "warn", layer: "microphone", message: "The microphone input level has been exactly zero for " + sec(now - this.micZeroSince) + " s: no signal at all (muted, unplugged, taken by another app, or a noise-gated microphone that reports nothing in silence)." });
+      if (this.heardAt !== null && this.transcriptAt !== null && this.transcriptAt >= this.heardAt) { /* answered */ }
+      else if (this.heardAt !== null && now - this.heardAt >= this.transcriptStallMs) out.push({ id: "transcript", level: "warn", layer: "transcription / end-of-turn", message: "ElevenLabs saw you speak for " + (this.heardMs / 1000).toFixed(1) + " s, but no transcript has arrived " + sec(now - this.heardAt) + " s after you stopped (ignore this if it was only noise). End-of-turn detection or speech-to-text is slow or stalled on the agent side." });
+      if (this.transcriptAt !== null && this.textAt === null && this.audibleAt === null && now - this.transcriptAt >= this.answerStallMs) out.push({ id: "answer", level: "warn", layer: "agent (LLM / voice generation)", message: "Your words were transcribed " + sec(now - this.transcriptAt) + " s ago and the teacher has not answered. The agent is slow or stalled (not the whiteboard: it only starts after the teacher's text)." });
+      if (this.textAt !== null && this.audibleAt === null && this.mode !== "speaking" && now - this.textAt >= this.audioStallMs) out.push({ id: "playback", level: "warn", layer: "audio playback", message: "The teacher's text arrived " + sec(now - this.textAt) + " s ago but no audio has played." });
+      if (this.lagAt !== null && this.lagMs >= this.jankMs && now - this.lagAt < 30000) out.push({ id: "jank", level: "warn", layer: "this page", message: "This page's main thread was blocked for " + Math.round(this.lagMs) + " ms recently. That delays the voice connection's audio handling (client-side)." });
+      if (this.teacherVadChecks >= 20 && this.vadWhileTeacher / this.teacherVadChecks >= 0.3) out.push({ id: "echo", level: "info", layer: "microphone", message: "Voice activity was detected during " + Math.round((100 * this.vadWhileTeacher) / this.teacherVadChecks) + "% of the time the teacher was talking: the microphone may be hearing the teacher's voice from the speakers (headphones avoid this, and avoid false interruptions)." });
+      if (this.deviceChanges.length && now - this.deviceChanges[this.deviceChanges.length - 1] < 60000) out.push({ id: "device", level: "info", layer: "microphone", message: "An audio device was added or removed " + sec(now - this.deviceChanges[this.deviceChanges.length - 1]) + " s ago; the browser may have switched microphones." });
+      const rank = { error: 0, warn: 1, info: 2 };
+      return out.sort((a, b) => rank[a.level] - rank[b.level]);
+    }
+    /** One numeric snapshot for the ring (no speech or text), e.g. every 15 s. `extra` carries page numbers. */
+    sample(now, extra) {
+      const snap = { t: Math.round((now - (this.startedAt == null ? now : this.startedAt)) / 1000), connected: this.connected, mode: this.mode, turns: this.studentTurns,
+        vadAgeMs: this.lastVadAt == null ? null : Math.round(now - this.lastVadAt), mic: this.micLast, lagMs: Math.round(this.lagMs), findings: this.diagnose(now).map((f) => f.id), ...(extra || {}) };
+      this.samples.push(snap); if (this.samples.length > this.maxSamples) this.samples.shift();
+      return snap;
+    }
+  }
+
   /**
    * Is a teacher turn worth a planner call? Short acknowledgements ("Great!", "Okay, go on.") have nothing to draw, so
    * asking Claude about them only adds a request, tokens and a wasted "nothing to draw" round trip.
@@ -875,7 +956,7 @@
   return {
     BOARD, COLORS, SIZES, SHAPES, OPS, LIMITS, PLANNER_MODEL, PLANNER_SYSTEM,
     compileExpression, createValidator, validatePlan, buildPlannerMessage, summariseNotebook, deriveContext, planBoardStream,
-    locateCue, findReferences, endsWithQuestion, pacingNote, boardStatusNote, TEACHING_STYLE_NOTE, TurnTimer, worthPlanning, SpeechClock, createOrderedDelivery, MOMENTS, SIDES, PAGE_KEYWORDS,
+    locateCue, findReferences, endsWithQuestion, pacingNote, boardStatusNote, TEACHING_STYLE_NOTE, TurnTimer, SessionHealth, worthPlanning, SpeechClock, createOrderedDelivery, MOMENTS, SIDES, PAGE_KEYWORDS,
     estimateSpeechMs, normalizeSpeech, cueSpoken, niceTicks,
   };
 });

@@ -73,6 +73,10 @@ button{font:inherit}
 .wbboard{padding:0;overflow:hidden}
 .caption{background:var(--caption-bg);color:var(--caption-ink);border-radius:10px;padding:12px 18px;min-height:3.6em;font-size:1.3rem;line-height:1.4;text-align:center;text-wrap:balance}
 .caption.you{font-style:italic;opacity:.85}
+.health{border-radius:10px;padding:10px 14px;background:var(--surface);border:2px solid var(--line);font-size:.95rem;color:var(--ink);display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap}
+.health.error{border-color:var(--danger)} .health.warn{border-color:var(--pencil)}
+.health .layer{font-weight:700} .health .more{color:var(--muted);font-size:.85rem;margin-top:4px}
+.health .actions{margin-left:auto}
 .timing{font-size:.9rem;color:var(--muted)}
 .timing summary{cursor:pointer;padding:4px 2px}
 .timing table{border-collapse:collapse;width:100%;margin-top:4px}
@@ -127,7 +131,8 @@ code{background:var(--bg);padding:1px 6px;border-radius:5px}
   </nav>
 
   <div class="caption" id="caption">Subtitles will appear here.</div>
-  <details class="timing" id="timing"><summary id="timingSummary">Turn timing (how quickly the teacher answers)</summary><div id="timingBody">Timing appears after your first turn. Only numbers are shown: no speech, text or keys.</div></details>
+  <div class="health" id="health" role="status" aria-live="polite" hidden><div><div id="healthText"></div><div class="more" id="healthMore"></div></div><div class="actions"><button class="btn" id="reconnect" type="button" hidden>Reconnect (keeps the board)</button></div></div>
+  <details class="timing" id="timing"><summary id="timingSummary">Turn timing (how quickly the teacher answers)</summary><div id="timingBody">Timing appears after your first turn. Only numbers are shown: no speech, text or keys.</div><button class="btn" id="copyDiag" type="button">Copy diagnostics (numbers only)</button></details>
 
   <div class="controls">
     <button class="call" id="call" type="button">
@@ -260,6 +265,7 @@ function getWhiteboard(){
   if (!whiteboard && engineReady()) whiteboard = new window.Whiteboard(wbHost, {
     log: (level, message) => boardEvent("engine", level, message),
     onNotebook: updateNotebook,
+    busy: () => app.dataset.mode === "speaking" || (turnTimer && turnTimer.speaking), // background checks wait while the voice conversation is active
     onMoment: (m) => boardEvent("moment", "info", "Teaching moment: " + m.kind.replace("_", " ") + (m.note ? " (" + m.note + ")" : "") + (m.kind === "wait" ? ". Drawing pauses until the student answers." : ".")),
     onRef: (r) => boardEvent("sync", r.late ? "warn" : "info", 'Reference "' + r.ref + '": ' + r.id + " was finished " + (r.finishedAfterReferenceMs <= 0 ? Math.abs(r.finishedAfterReferenceMs) + " ms before" : r.finishedAfterReferenceMs + " ms after") + " the teacher said it" + (r.late ? " (too late)." : ".")),
     onStepStart: (step) => { if (/^(write|graph|plot|point|shape|dframe|dnode|dlink|correct)$/.test(step.op)){ turnTimer.mark("penStart", step.at); renderTiming(); } },
@@ -334,22 +340,69 @@ function renderTiming(){
 }
 try { new PerformanceObserver(list => { for (const e of list.getEntries()){ turnTimer.longTask(e.startTime, e.duration); } }).observe({ entryTypes: ["longtask"] }); } catch(e){ /* long task timing is not available in every browser */ }
 
+/* ----- Long-session health: watches the connection, microphone signals, transcription, the agent and this page ----- */
+const health = (window.WhiteboardCore && window.WhiteboardCore.SessionHealth) ? new window.WhiteboardCore.SessionHealth() : { open(){}, close(){}, setMode(){}, vad(){}, transcript(){}, agentText(){}, audible(){}, visibility(){}, deviceChange(){}, mic(){}, jank(){}, diagnose(){ return []; }, sample(){ return {}; }, samples: [] };
+window.__health = health;
+let lessonHeard = false, unexpectedClose = false, resumeNeeded = false, shownFindings = new Map(), hintsSent = 0, hintChars = 0, sessionsStarted = 0;
+// How long the page's own main thread was blocked: a stalled page delays the audio the voice connection hands it.
+{ let last = performance.now(); setInterval(() => { const now = performance.now(), lag = Math.max(0, now - last - 250); last = now; if (lag > 120 && !document.hidden) health.jank(lag, now); }, 250); // (a background tab's timers are throttled by the browser: that is not a blocked page)
+  document.addEventListener("visibilitychange", () => { last = performance.now(); }); }
+document.addEventListener("visibilitychange", () => health.visibility(document.hidden, tNow()));
+let bannerId = null, bannerAt = 0;
+try { navigator.mediaDevices && navigator.mediaDevices.addEventListener("devicechange", () => health.deviceChange(tNow())); } catch(e){ /* not available */ }
+function renderHealth(){
+  const now = tNow(), found = health.diagnose(now), box = $("health");
+  for (const f of found) if (!shownFindings.has(f.id)){ shownFindings.set(f.id, now); boardEvent("health", f.level === "error" ? "error" : f.level === "warn" ? "warn" : "info", "Session health [" + f.layer + "]: " + f.message); }
+  for (const id of [...shownFindings.keys()]) if (!found.some(f => f.id === id)) shownFindings.delete(id); // cleared: a later recurrence is reported again
+  const top = found[0];
+  box.hidden = !top; box.className = "health" + (top ? " " + top.level : "");
+  if (top && (top.id !== bannerId || now - bannerAt > 10000)){ // rewritten only when the problem changes (or every 10 s for its counter): a live region that changes every second would be read out every second
+    bannerId = top.id; bannerAt = now;
+    $("healthText").innerHTML = '<span class="layer"></span> <span class="msg"></span>';
+    box.querySelector(".layer").textContent = top.layer + ":"; box.querySelector(".msg").textContent = top.message;
+    $("healthMore").textContent = found.length > 1 ? "Also: " + found.slice(1).map(f => f.layer + ": " + f.message).join(" ") : "";
+  }
+  if (!top) bannerId = null;
+  $("reconnect").hidden = !(unexpectedClose && !convo);
+}
+function healthSample(){
+  const wb = whiteboard, mem = performance.memory;
+  const snap = health.sample(tNow(), { dom: wb ? document.querySelectorAll("#wbBoard *").length : 0, pages: wb ? wb.pages.length : 0, queue: wb ? wb.queue.length : 0, plans: plans.size, hints: hintsSent, hintChars, heapMB: mem ? Math.round(mem.usedJSHeapSize / 1048576) : null, sessions: sessionsStarted });
+  return snap;
+}
+setInterval(() => { try { if (convo && typeof convo.getInputVolume === "function") health.mic(convo.getInputVolume(), tNow()); } catch(e){ /* the SDK has no input level on this connection: unavailable, not guessed */ } renderHealth(); }, 1000);
+setInterval(healthSample, 15000);
+$("copyDiag").onclick = async () => {
+  const report = { note: "numbers only: no speech, text or keys", takenAtSeconds: Math.round((tNow() - (health.startedAt || 0)) / 1000), findings: health.diagnose(tNow()).map(f => ({ id: f.id, layer: f.layer })), samples: health.samples, timing: turnTimer.turns.map(t => turnTimer.report(t) && Object.fromEntries(turnTimer.report(t).rows.map(r => [r.key, r.ms]))) };
+  try { await navigator.clipboard.writeText(JSON.stringify(report)); $("copyDiag").textContent = "Copied"; } catch(e){ $("copyDiag").textContent = "Could not copy (see the console)"; console.log("[Whiteboard] diagnostics", JSON.stringify(report)); }
+  setTimeout(() => { $("copyDiag").textContent = "Copy diagnostics (numbers only)"; }, 2500);
+};
+/* After a connection problem the lesson continues in a NEW ElevenLabs session, which does not remember the old one. The board,
+   the notebook and the transcript are kept here, and a short summary is sent to the new session; it is told plainly that this is
+   all it knows. Nothing is reconnected silently: the student presses Reconnect. */
+function resumeNote(){
+  const wb = whiteboard, status = wb ? window.WhiteboardCore.boardStatusNote(wb.notebook(), wb.pacing()) : "";
+  const said = transcript.slice(-3).map(m => (m.role === "teacher" ? "Teacher: " : "Student: ") + m.text.slice(-160)).join(" | ");
+  return ("This lesson was interrupted by a connection problem and continues in a new session, so you do not remember it. Only this summary is known. " + status + (said ? " Last things said: " + said : "") + " Continue naturally from here; do not repeat what is already on the board and do not pretend to remember anything not listed.").slice(0, 900);
+}
+$("reconnect").onclick = () => { if (!convo && !starting){ connType = "websocket"; problems = []; resumeNeeded = true; start(); } };
+
 /* Session-only messages to the agent's LLM (contextual updates). They never edit the agent's saved configuration, never
    interrupt it, and cannot slow or pause speech that is already playing: they only shape what it says next. */
 function hintsOn(){ return $("teachHints").value === "on" && convo && typeof convo.sendContextualUpdate === "function"; }
-function sendHint(text, what){ if (!hintsOn()) return; try { turnTimer.hint(what, tNow()); convo.sendContextualUpdate(text); boardEvent("hint", "info", "Told the agent (this session only): " + what); } catch (error){ boardEvent("hint", "warn", "Could not send a hint to the agent: " + (error && error.message)); } }
+function sendHint(text, what){ if (!hintsOn()) return false; try { turnTimer.hint(what, tNow()); hintsSent++; hintChars += text.length; convo.sendContextualUpdate(text); boardEvent("hint", "info", "Told the agent (this session only): " + what); return true; } catch (error){ boardEvent("hint", "warn", "Could not send a hint to the agent: " + (error && error.message)); return false; } }
 let statusTimer = null;
 /* Every context update stays in the agent's prompt for the rest of the lesson, so the board status is sent only when it
    changed, never while the student is talking, and at most once every 20 seconds: a prompt that keeps growing slows the agent's replies. */
-let lastStatusText = "", lastStatusAt = -Infinity;
+let lastStatusText = "", lastStatusAt = -Infinity, statusCount = 0;
 function sendBoardStatus(){ // once the pencil has finished, tell the agent what is written so the next turn builds on it
   if (!hintsOn() || !whiteboard) return;
   clearTimeout(statusTimer);
   statusTimer = setTimeout(async () => {
     const wb = whiteboard; if (!wb) return; await wb.idle();
     const text = window.WhiteboardCore.boardStatusNote(wb.notebook(), wb.pacing());
-    if (text === lastStatusText || tNow() - lastStatusAt < 20000 || turnTimer.speaking) return;
-    lastStatusText = text; lastStatusAt = tNow(); sendHint(text, "board status");
+    if (text === lastStatusText || tNow() - lastStatusAt < 90000 || statusCount >= 8 || turnTimer.speaking) return; // every update stays in the agent's prompt for the whole lesson: few, short, rare
+    if (sendHint(text, "board status")){ statusCount++; lastStatusText = text; lastStatusAt = tNow(); }
   }, 400);
 }
 function abortPlans(){ for (const c of plans) c.abort(); plans.clear(); }
@@ -399,6 +452,7 @@ async function drawAnimatedBoard(options){
   const board = getWhiteboard(), my = ++boardReq, myTurn = turnReq;
   if (!options.handled) abortPlans(); // a new turn replaces the old plan; a continuation runs beside its first part
   const abort = new AbortController(); plans.add(abort);
+  let timedOut = false; const plannerTimeout = setTimeout(() => { timedOut = true; abort.abort(); }, 45000); // a request that never answers must not hold the plan (and later plans of the turn) for ever
   lastPlanStart = Date.now();
   const t0 = performance.now(); let firstStepMs = null, steps = 0;
   turnTimer.mark("plannerRequest", t0); turnTimer.count("plannerCalls");
@@ -440,6 +494,7 @@ async function drawAnimatedBoard(options){
     setBadge("Animated · " + steps + " steps", "live");
     boardEvent("animated", "info", "Drawing " + steps + " step(s) by hand; plan complete after " + Math.round(performance.now() - t0) + " ms" + (result.usage && result.usage.output_tokens ? " (" + result.usage.output_tokens + " output tokens)" : "") + ".");
   } catch(e){
+    if (e && e.name === "AbortError" && timedOut){ boardEvent("planner", "warn", "The planner did not answer within 45 s and was stopped; the lesson continues without this drawing."); return; }
     if (e && e.name === "AbortError"){ boardEvent("planner", "info", "Plan cancelled (the student spoke or a newer turn started)."); return; }
     if (e && e.status === 401){ statusEl.textContent = "Whiteboard: the Anthropic key didn't work. Check it in Setup."; setBadge("Anthropic key rejected", "warn"); boardEvent("planner", "error", "Anthropic rejected the API key (401)."); return; }
     boardEvent("planner", "error", "Planner failed: " + (e && (e.status ? "HTTP " + e.status : e.message)));
@@ -447,7 +502,7 @@ async function drawAnimatedBoard(options){
     if (stale()) return;
     if (steps > 0 || options.handled){ boardEvent("planner", "warn", "The plan stopped after " + steps + " step(s); keeping what was drawn."); return; }
     fallbackToClassic("planner error " + (e && (e.status || e.message)));
-  } finally { plans.delete(abort); resolveDone(); }
+  } finally { clearTimeout(plannerTimeout); plans.delete(abort); resolveDone(); }
 }
 async function drawBoard(){
   const key = $("anthropicKey").value.trim();
@@ -482,9 +537,12 @@ function describe(msg, ctx){
   if (ctx && typeof ctx === "object"){ ["errorType","code","debugMessage","details","closeCode","closeReason","message"].forEach(k => { if (ctx[k]) bits.push(k + ": " + (typeof ctx[k] === "object" ? JSON.stringify(ctx[k]) : ctx[k])); }); }
   return bits.join(" · ");
 }
+let starting = false; // a session is being opened: a second click or retry must not open another one
 async function start(isRetry){
   const agentId = $("agentId").value.trim();
   if (!agentId){ $("setup").showModal(); return; }
+  if (starting || convo) return;
+  starting = true; unexpectedClose = false; renderHealth();
   setMode("connecting"); if (!isRetry) statusEl.textContent = ""; heardAgent = false; lastProblem = "";
   try {
     convo = await Conversation.startSession({
@@ -508,21 +566,23 @@ async function start(isRetry){
           return "The board now shows it.";
         }
       },
-      onConnect: () => { $("call").classList.add("live"); $("callWord").textContent = "End lesson"; setMode("listening"); setTimeout(() => sendHint(window.WhiteboardCore.TEACHING_STYLE_NOTE, "teaching style (one step at a time, say it before writing it)"), 300); },
+      onConnect: () => { starting = false; health.open(tNow()); sessionsStarted++; lastStatusAt = -Infinity; statusCount = 0; lastStatusText = ""; unexpectedClose = false; if (resumeNeeded){ setTimeout(() => { try { if (!convo) return; convo.sendContextualUpdate(resumeNote()); resumeNeeded = false; hintsSent++; boardEvent("health", "info", "Reconnected: the board and transcript were kept; a short summary was sent to the new session (it does not remember the old one)."); } catch(e){} }, 500); } $("call").classList.add("live"); $("callWord").textContent = "End lesson"; setMode("listening"); setTimeout(() => sendHint(window.WhiteboardCore.TEACHING_STYLE_NOTE, "teaching style (one step at a time, say it before writing it)"), 300); },
       onDisconnect: (d) => {
+        starting = false; health.close(tNow(), (d && (d.message || d.reason)) || "closed"); if (d && d.reason !== "user" && (heardAgent || lessonHeard)) unexpectedClose = true;
         if (!lastProblem && d && (d.reason === "error" || (!heardAgent && d.reason === "agent")))
           lastProblem = "Problem (" + connType + "): " + describe(d.message || ("closed by " + d.reason), { ...(d.context || {}), closeCode: d.closeCode, closeReason: d.closeReason });
         if (lastProblem){ problems.push(lastProblem); statusEl.textContent = problems.join("  ||  "); }
-        const retry = !heardAgent && !!lastProblem && connType === "websocket";
-        convo = null; $("call").classList.remove("live"); $("callWord").textContent = "Start lesson"; setMode("idle"); interruptBoard();
+        const retry = !heardAgent && !lessonHeard && !!lastProblem && connType === "websocket"; // only a lesson that has never connected falls back to another connection type; a lesson in progress is never reconnected silently
+        convo = null; $("call").classList.remove("live"); $("callWord").textContent = "Start lesson"; setMode("idle"); interruptBoard(); renderHealth();
         if (retry){ connType = "webrtc"; statusEl.textContent += " · Trying another way to connect..."; setTimeout(() => start(true), 600); }
       },
       onModeChange: ({ mode }) => {
+        health.setMode(mode, tNow());
         const wasSpeaking = app.dataset.mode === "speaking";
         if (mode === "speaking"){
           clearTimeout(endTimer); // a short gap between sentences is not the end of the turn
           if (!wasSpeaking){
-            turnTimer.audible(tNow(), "speaking mode"); renderTiming(); // (an exact playback event, when the SDK sends one, replaces this)
+            turnTimer.audible(tNow(), "speaking mode"); health.audible(tNow()); renderTiming(); // (an exact playback event, when the SDK sends one, replaces this)
             const wb = getWhiteboard();
             // Text that arrived long after its voice had ended (and no voice ever started for it) belongs to a finished turn.
             if (wb && turnOpen && wb.clock.startedAt == null && wb.clock.messageAt != null && wb.now() - wb.clock.messageAt > 4000) turnOpen = false;
@@ -537,14 +597,14 @@ async function start(isRetry){
       // The agent was cut off by the student: stop drawing whatever was still queued.
       onInterruption: () => { interruptBoard(); turnTimer.mark("interrupted", tNow()); },
       // Voice activity (the SDK's own score for whether the student is speaking), used only to time the turn.
-      onVadScore: ({ vadScore }) => turnTimer.vad(vadScore, tNow()),
+      onVadScore: ({ vadScore }) => { turnTimer.vad(vadScore, tNow()); health.vad(vadScore, tNow()); },
       onPing: (ping) => { turnTimer.ping(ping && ping.ping_ms); },
       onAudio: () => { turnTimer.mark("audioChunk", tNow()); },
       onAudioAlignment: () => { turnTimer.mark("audioChunk", tNow()); },
       // Fires as each piece of the teacher's voice actually plays, if the agent sends character timing.
       // When it does, drawing steps wait for the words they belong to. When it doesn't, drawing is paced by time.
       // WebSocket connections only: ElevenLabs does not send audio events (and so no alignment) over WebRTC.
-      onAudioAlignmentPlayback: (e) => { turnTimer.audible(tNow(), "audio playback event"); renderTiming(); const a = e && e.alignment, chars = a && a.chars; if (whiteboard && Array.isArray(chars)) whiteboard.speechProgress(chars.join(""), a.char_start_times_ms, e.event_id); },
+      onAudioAlignmentPlayback: (e) => { turnTimer.audible(tNow(), "audio playback event"); health.audible(tNow()); renderTiming(); const a = e && e.alignment, chars = a && a.chars; if (whiteboard && Array.isArray(chars)) whiteboard.speechProgress(chars.join(""), a.char_start_times_ms, e.event_id); },
       // The agent's reply as it is being written, before the voice has finished it. Only sent if "agent_chat_response_part"
       // is enabled in the agent's client events. The first complete sentence is enough to start the pen early.
       onAgentChatResponsePart: (part) => {
@@ -565,8 +625,9 @@ async function start(isRetry){
         const fromYou = m.source === "user" || m.role === "user";
         captionEl.classList.toggle("you", fromYou);
         captionEl.textContent = fromYou ? "You: " + text : text;
-        if (!fromYou) heardAgent = true;
+        if (!fromYou) heardAgent = lessonHeard = true;
         turnTimer.mark(fromYou ? "transcript" : "agentText", tNow(), fromYou ? undefined : "the final message"); renderTiming();
+        if (fromYou) health.transcript(tNow()); else health.agentText(tNow());
         if (fromYou){ lastPlannedText = ""; interruptBoard(); toolUsedThisTurn = false; toolHint = ""; lastToolHtml = ""; lastPlanStart = 0; noteMessage("student", text); }
         else {
           const wb = getWhiteboard();
@@ -592,13 +653,14 @@ async function start(isRetry){
       onError: (msg, ctx) => { lastProblem = "Problem (" + connType + "): " + describe(typeof msg === "string" ? msg : (msg?.message || String(msg)), ctx); statusEl.textContent = problems.concat(lastProblem).join("  ||  "); console.error(lastProblem, ctx); }
     });
   } catch(e){
+    starting = false;
     setMode("idle");
     statusEl.textContent = /permission|notallowed/i.test(String(e?.name || e?.message || e))
       ? "Allow the microphone (click the icon in the address bar) and try again."
       : "Couldn't start: " + (e?.message || e) + ". Check the Agent ID in Setup.";
   }
 }
-$("call").onclick = async () => { if (convo){ await convo.endSession(); } else { connType = "websocket"; problems = []; start(); } };
+$("call").onclick = async () => { if (convo){ await convo.endSession(); } else if (!starting){ connType = "websocket"; problems = []; resumeNeeded = unexpectedClose || resumeNeeded; start(); } }; // (starting a new lesson session after a drop also sends the summary)
 $("typed").addEventListener("input", () => { if (convo) convo.sendUserActivity(); });
 function sendTyped(){ const q = $("typed").value.trim(); if (!q) return;
   if (!convo){ statusEl.textContent = "Press Start lesson first."; return; }

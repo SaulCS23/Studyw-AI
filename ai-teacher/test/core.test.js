@@ -806,3 +806,88 @@ test("timeline: events that arrive out of order are unavailable, never negative,
   assert.equal(echo.speaking, false, "after 60 s it is treated as stuck");
 });
 
+
+/* ---------- long-session health: a 30 minute lesson of simulated events ---------- */
+
+/** A student turn on the health monitor: speak for talkMs (voice activity every 100 ms), stop, then the agent answers. Returns the end time. */
+function healthTurn(h, t, o) {
+  const opts = o || {}, talk = opts.talkMs || 1500;
+  for (let k = 0; k <= talk; k += 100) h.vad(0.9, t + k);
+  for (let k = talk + 100; k <= talk + 700; k += 100) h.vad(0.03, t + k);
+  const stop = t + talk;
+  if (opts.transcriptMs != null) h.transcript(stop + opts.transcriptMs);
+  if (opts.textMs != null) h.agentText(stop + opts.textMs);
+  if (opts.audibleMs != null) { h.setMode("speaking", stop + opts.audibleMs); h.audible(stop + opts.audibleMs); }
+  return stop + (opts.audibleMs || opts.textMs || opts.transcriptMs || 800) + (opts.speakMs || 8000);
+}
+
+test("health: a healthy 30 minute lesson of 60 turns raises no finding at any moment and keeps a bounded history", () => {
+  const h = new core.SessionHealth(); h.open(0);
+  let t = 1000, worst = [];
+  for (let turn = 0; turn < 60; turn++) {
+    h.setMode("listening", t);
+    const end = healthTurn(h, t, { transcriptMs: 700, textMs: 1400, audibleMs: 1800, speakMs: 12000 });
+    for (let at = t; at <= end; at += 1000) { for (let k = 0; k < 10; k++) h.vad(0.02, at + k * 100); h.mic(0.05, at); const found = h.diagnose(at); if (found.length) worst.push(turn + ":" + found.map((f) => f.id).join(",")); }
+    h.sample(end); t = end + 10000;
+  }
+  assert.deepEqual(worst, [], "no false alarms over 30 minutes: " + worst.slice(0, 3));
+  assert.equal(h.studentTurns, 60);
+  assert.ok(h.samples.length <= 240);
+  for (let i = 0; i < 400; i++) h.sample(t + i);
+  assert.equal(h.samples.length, 240, "the history is a ring");
+});
+
+test("health: the microphone or voice-activity stream going quiet is reported by layer, and clears when it returns", () => {
+  const h = new core.SessionHealth(); h.open(0); h.setMode("listening", 0);
+  for (let t = 0; t <= 300000; t += 100) h.vad(0.02, t); // five healthy minutes of heartbeat
+  assert.deepEqual(h.diagnose(300500), []);
+  const found = h.diagnose(307000); // 6.9 s without any update
+  assert.equal(found[0].id, "vad"); assert.ok(found[0].layer.includes("microphone") && found[0].message.includes("not hearing you"));
+  h.vad(0.02, 308000);
+  assert.deepEqual(h.diagnose(308100), [], "back to normal");
+  const quietFromTheStart = new core.SessionHealth(); quietFromTheStart.open(0);
+  assert.deepEqual(quietFromTheStart.diagnose(60000), [], "an agent that never sends voice-activity updates is not accused of a microphone failure");
+});
+
+test("health: stalled transcription, a stalled agent and missing audio each name their own layer", () => {
+  let h = new core.SessionHealth(); h.open(0); h.setMode("listening", 0);
+  const end = healthTurn(h, 1000, {}); // spoke, never transcribed
+  assert.deepEqual(h.diagnose(1000 + 1500 + 5000), [], "not yet");
+  for (let t = 3300; t <= 11500; t += 100) h.vad(0.02, t); // the microphone itself is fine: it keeps reporting silence
+  const stalled = h.diagnose(11500);
+  assert.deepEqual(stalled.map((f) => f.id), ["transcript"], "only the transcription layer is blamed");
+  assert.ok(stalled[0].layer.includes("transcription"));
+  h = new core.SessionHealth(); h.open(0); h.setMode("listening", 0); healthTurn(h, 1000, { transcriptMs: 600 });
+  assert.equal(h.diagnose(1000 + 1500 + 600 + 16000).find((f) => f.id === "answer").layer, "agent (LLM / voice generation)");
+  h = new core.SessionHealth(); h.open(0); h.setMode("listening", 0); healthTurn(h, 1000, { transcriptMs: 600, textMs: 1200 });
+  assert.equal(h.diagnose(1000 + 1500 + 1200 + 11000).find((f) => f.id === "playback").layer, "audio playback");
+});
+
+test("health: a closed connection, a background tab, echo, a dead microphone level and a blocked page are all reported", () => {
+  const h = new core.SessionHealth(); h.open(0); h.setMode("listening", 0);
+  for (let t = 0; t < 2000; t += 100) h.vad(0.02, t);
+  h.visibility(true, 2000); assert.equal(h.diagnose(6000).find((f) => f.id === "hidden").layer, "browser"); h.visibility(false, 6000);
+  for (let t = 6000; t < 52000; t += 1000) h.mic(0, t); for (let t = 6000; t < 52000; t += 100) h.vad(0.02, t); assert.ok(h.diagnose(52000).some((f) => f.id === "mic-zero"));
+  h.mic(0.3, 52000); assert.ok(!h.diagnose(52100).some((f) => f.id === "mic-zero"));
+  h.jank(900, 52000); assert.ok(h.diagnose(53000).some((f) => f.id === "jank" && f.layer === "this page"));
+  const echo = new core.SessionHealth(); echo.open(0); echo.setMode("speaking", 0); for (let t = 0; t < 4000; t += 100) echo.vad(t % 300 === 0 ? 0.9 : 0.1, t);
+  assert.ok(echo.diagnose(4100).some((f) => f.id === "echo"));
+  h.close(60000, "the websocket closed"); const gone = h.diagnose(63000);
+  assert.equal(gone.length, 1); assert.equal(gone[0].id, "connection"); assert.ok(gone[0].message.includes("board and your notes are kept"));
+  h.open(70000); assert.ok(!h.diagnose(70500).some((f) => f.id === "connection"), "reconnecting clears it");
+});
+
+test("health: a new session starts clean (nothing stale from the old one) and echo is judged on recent behaviour", () => {
+  const h = new core.SessionHealth(); h.open(0); h.setMode("listening", 0);
+  healthTurn(h, 1000, {});                       // spoke, then the connection dropped before any transcript
+  h.close(5000, "closed"); h.open(6000);
+  for (let t = 6000; t <= 30000; t += 100) h.vad(0.02, t);
+  assert.deepEqual(h.diagnose(30000), [], "no 'transcript stalled' from the previous session");
+  const t2 = new core.SessionHealth(); t2.open(0); healthTurn(t2, 1000, { transcriptMs: 500 }); t2.close(9000, "closed"); t2.open(10000);
+  for (let t = 10000; t <= 40000; t += 100) t2.vad(0.02, t);
+  assert.deepEqual(t2.diagnose(40000), [], "no 'agent stalled' either");
+  const echo = new core.SessionHealth(); echo.open(0); echo.setMode("speaking", 0);
+  for (let t = 0; t < 3000; t += 100) echo.vad(0.9, t);       // an early burst
+  for (let t = 3000; t < 80000; t += 100) echo.vad(0.02, t);  // then 77 s of clean speech
+  assert.ok(!echo.diagnose(80000).some((f) => f.id === "echo"), "an early burst does not mark the whole lesson");
+});
