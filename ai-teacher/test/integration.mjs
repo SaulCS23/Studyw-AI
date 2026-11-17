@@ -517,7 +517,7 @@ try {
   let plannerCount = service.planner.length;
   await hear("Okay."); await speak("Great!"); await sleep(600);
   check("efficiency: a short acknowledgement is not sent to the planner", service.planner.length === plannerCount && (await timing()).plannerSkipped >= 1 && (await events("turn")).some((m) => m.includes("nothing to draw, so no planner call")), JSON.stringify(await timing()));
-  await hear("Show me the curve again."); await speak(turnText); await sleep(400); plannerCount = service.planner.length;
+  const plannedBefore = service.planner.length; await hear("Show me the curve again."); await speak(turnText); await waitFor(() => service.planner.length > plannedBefore, "first plan requested", 15000); await sleep(600); plannerCount = service.planner.length; // (the first plan has been asked for; only a DUPLICATE could add another)
   await page(`__opts.onMessage({ source: 'ai', message: ${JSON.stringify(turnText)} }); true`); await sleep(500);
   check("efficiency: the same teacher message arriving twice is planned once", service.planner.length === plannerCount && (await events("turn")).some((m) => m.includes("arrived again")), String(service.planner.length - plannerCount));
   await settled(3000);
