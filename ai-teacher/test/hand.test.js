@@ -116,3 +116,13 @@ test("writing speed is human: a short word takes a second or two, a line a few s
   assert.ok(word > 600 && word < 3500, "word ms " + word);
   assert.ok(line > 3000 && line < 12000, "line ms " + line);
 });
+
+test("plain text uses the printed single-stroke face (not cursive), with air between letters", () => {
+  const o = hand.typesetText("o", { size: 40, seed: "k" }), H = hand.typesetText("H", { size: 40, seed: "k" });
+  assert.ok(o.height < H.height * 0.85 && o.height > H.height * 0.5, "a printed lowercase letter is about two thirds of a capital: " + o.height + " vs " + H.height);
+  const wide = hand.typesetText("nnnn", { size: 40, seed: "k" }), single = hand.typesetText("n", { size: 40, seed: "k" });
+  assert.ok(wide.width > single.width * 3.6, "letters are tracked apart: " + wide.width + " vs " + single.width);
+  // letters stand upright: no cursive slant, so the stems of 'l' are (nearly) vertical
+  const l = hand.typesetText("l", { size: 40, seed: "k" }).strokes[0], dx = Math.abs(l[l.length - 1][0] - l[0][0]), dy = Math.abs(l[l.length - 1][1] - l[0][1]);
+  assert.ok(dx < dy * 0.15, "an upright stem: dx " + dx + ", dy " + dy);
+});

@@ -23,7 +23,7 @@
   const MARGIN = Layout.DEFAULTS.margin;
 
   const INK = { ink: ["#24313a", "#eef3ea"], blue: ["#2459c4", "#8db8ff"], red: ["#c2412d", "#ff8d78"], green: ["#2c7a4b", "#7bd49f"], amber: ["#a8690a", "#f0c35a"], violet: ["#7440b8", "#c9a8f7"] };
-  const FONT_SIZE = { title: 46, body: 34, small: 28 };
+  const FONT_SIZE = { title: 52, body: 39, small: 32 }; // printed letters, a little larger than before for legibility
   const TEXT_WIDTH = { title: 920, body: 560, small: 560 }; // how wide a line of text may get before it wraps
   const CALC_RESERVE = 150;                                 // room kept below the first line of a calculation
   const STROKE = 4;
@@ -906,11 +906,11 @@
       const labels = [];
       for (const v of xTicks) if (!(Math.abs(v) < 1e-9 && axisX !== margin.l)) labels.push({ text: String(v), x: sx(v), y: axisY + 28, anchor: "middle" });
       for (const v of yTicks) if (!(Math.abs(v) < 1e-9 && axisY !== margin.t + plotH)) labels.push({ text: String(v), x: axisX - 12, y: sy(v) + 8, anchor: "end" });
-      const tickLabels = await this.writeLabels(item.g, labels, "currentColor", offset, d, 22);
+      const tickLabels = await this.writeLabels(item.g, labels, "currentColor", offset, d, 26);
       const axisLabels = [];
       if (op.xlabel) axisLabels.push({ text: op.xlabel, x: margin.l + plotW - 4, y: axisY - 12, anchor: "end" });
       if (op.ylabel) axisLabels.push({ text: op.ylabel, x: axisX + 12, y: margin.t + 14, anchor: "start" });
-      const nameLabels = await this.writeLabels(item.g, axisLabels, "currentColor", offset, d, 28);
+      const nameLabels = await this.writeLabels(item.g, axisLabels, "currentColor", offset, d, 32);
       // What a curve or point label must stay clear of: the axes, the numbers, the axis names, and (as they are drawn) the curves.
       item.graph.obstacles = { rects: [{ x: margin.l - 6, y: axisY - 5, w: plotW + 10, h: 10 }, { x: axisX - 5, y: margin.t - 4, w: 10, h: plotH + 10 }, ...(tickLabels ? tickLabels.rects : []), ...(nameLabels ? nameLabels.rects : [])], lines: [] };
       item.text = [op.xlabel, op.ylabel].filter(Boolean).join(" vs ");
@@ -956,10 +956,10 @@
       obstacles.lines.push(...runs.filter((r) => r.length > 1));
       if (op.label && labelPoint) {
         // Beside the curve on a free side: never on a curve, an axis, a number or another label.
-        const size = hand.typesetText(op.label, { size: 26 });
+        const size = hand.typesetText(op.label, { size: 28 });
         const spot = Diagram.placeLabel([sx(labelPoint.x), sy(labelPoint.y)], { w: size.width, h: size.height }, { rects: obstacles.rects, lines: obstacles.lines }, { x: margin.l, y: margin.t, w: plotW, h: plotH }, { gap: 12 });
         if (!spot.ok) this.log("info", `The label "${op.label}" has no completely free place beside its curve; placed where it overlaps least.`);
-        const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start" }], colorVar(op.color), offset, d, 26);
+        const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start" }], colorVar(op.color), offset, d, 28);
         if (written) obstacles.rects.push(...written.rects);
       }
     }
@@ -975,10 +975,10 @@
       this.movePencil(offset.x + cx, offset.y + cy, true);
       await this.tween(d(300), (p) => { dot.setAttribute("r", num(7 * p)); });
       if (op.label) {
-        const size = hand.typesetText(op.label, { size: 26 }), obstacles = graphItem.graph.obstacles || (graphItem.graph.obstacles = { rects: [], lines: [] });
+        const size = hand.typesetText(op.label, { size: 28 }), obstacles = graphItem.graph.obstacles || (graphItem.graph.obstacles = { rects: [], lines: [] });
         const dotRect = { x: cx - 9, y: cy - 9, w: 18, h: 18 };
         const spot = Diagram.placeLabel([cx, cy], { w: size.width, h: size.height }, { rects: [...obstacles.rects, dotRect], lines: obstacles.lines }, { x: 2, y: 2, w: graphItem.bbox.w - 4, h: graphItem.bbox.h - 4 }, { gap: 12 });
-        const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start" }], colorVar(op.color), offset, d, 26);
+        const written = await this.writeLabels(item.g, [{ text: op.label, x: spot.x, y: spot.y, top: true, anchor: "start" }], colorVar(op.color), offset, d, 28);
         if (written) obstacles.rects.push(...written.rects);
       }
     }
@@ -1077,7 +1077,7 @@
       if (R.style === "dashed") { path.setAttribute("stroke-dasharray", "10 9"); await this.revealPath(path, { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs) || 1, h: Math.max(...ys) - Math.min(...ys) || 1 }, ms, offset); }
       else await this.drawPath(path, ms, offset);
       if (R.label && R.labelBox) {
-        const t = hand.typesetText(R.label, { size: Diagram.LABEL_SIZE - 4, maxWidth: Diagram.LINK_LABEL_WIDTH, seed: R.label });
+        const t = hand.typesetText(R.label, { size: Diagram.LINK_LABEL_SIZE, maxWidth: Diagram.LINK_LABEL_WIDTH, seed: R.label });
         const built = this.buildHand(item.g, t.strokes.map((s) => s.map(([x, y]) => [x + R.labelBox.x, y + R.labelBox.y])), color, 2.4);
         this.stats.handwritten++;
         await this.playHand(built, d(built.timeline.total), offset, SPEED.labelBoost);

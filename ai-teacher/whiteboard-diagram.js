@@ -23,7 +23,7 @@
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
-  const LABEL_SIZE = 28, TITLE_SIZE = 38, LINK_LABEL_WIDTH = 120; // connector labels wrap at this width, so long ones do not widen the gutters
+  const LABEL_SIZE = 32, TITLE_SIZE = 43, LINK_LABEL_WIDTH = 140, LINK_LABEL_SIZE = 27; // connector labels wrap at this width, so long ones do not widen the gutters
   const PAD = { x: 18, y: 12 };           // space between a label and the border of its box
   const FRAME_PAD = 24;                   // an empty channel around the whole grid, so routes can go around the outside
   const CLEAR = 7;                        // how far connectors keep from nodes, and labels from lines
@@ -142,7 +142,7 @@
     //    so one big node does not make everything else big.
     const count = topLevel.length;
     const widest = Math.max(60, ...topLevel.map((n) => laid.get(n.id).w));
-    const linkLabels = spec.links.filter((l) => l.label).map((l) => measure(l.label, { size: LABEL_SIZE - 4, maxWidth: LINK_LABEL_WIDTH }));
+    const linkLabels = spec.links.filter((l) => l.label).map((l) => measure(l.label, { size: LINK_LABEL_SIZE, maxWidth: LINK_LABEL_WIDTH }));
     let gutterX = Math.max(o.minGutterX, ...linkLabels.map((t) => Math.ceil(t.w) + 40)), gutterY = Math.max(o.minGutterY, ...linkLabels.map((t) => Math.ceil(t.h) + 36));
     const title = spec.title ? measure(spec.title, { size: TITLE_SIZE, maxWidth: o.maxW }) : null;
     const titleBand = title ? Math.ceil(title.h) + o.titleGap : 0;
@@ -237,7 +237,7 @@
       const trim = (from, to, by) => { const d = Math.hypot(to[0] - from[0], to[1] - from[1]) || 1; return [from[0] + ((to[0] - from[0]) / d) * by, from[1] + ((to[1] - from[1]) / d) * by]; };
       const finish = (pts) => { const q = pts.map((p) => [p[0], p[1]]); q[0] = trim(q[0], q[1], 4); q[q.length - 1] = trim(q[q.length - 1], q[q.length - 2], 6); return q; };
       let t = null, labelBlocks = null;
-      if (link.label) { t = measure(link.label, { size: LABEL_SIZE - 4, maxWidth: LINK_LABEL_WIDTH }); labelBlocks = [...blocks, ...[...all.values()].map((n) => inflate(nodeRect(n), CLEAR))]; }
+      if (link.label) { t = measure(link.label, { size: LINK_LABEL_SIZE, maxWidth: LINK_LABEL_WIDTH }); labelBlocks = [...blocks, ...[...all.values()].map((n) => inflate(nodeRect(n), CLEAR)), ...(titleBand ? [{ x: -2000, y: -2000, w: 6000, h: 2000 + titleBand }] : [])]; } // (the title band is no place for a label)
       // The route and its label are chosen together: the shortest route whose label also has a clean place beside it.
       let chosen = null, spot = null;
       for (const cand of scored.slice(0, 14)) {
@@ -333,7 +333,7 @@
     // Search outward in rings, nearest first, in eight directions (up-right preferred): the closest spot that is free.
     const directions = [[1, -1], [1, 1], [-1, -1], [-1, 1], [1, 0], [-1, 0], [0, -1], [0, 1]];
     let best = null;
-    for (const ring of [1, 1.8, 2.8, 4, 5.5]) {
+    for (const ring of [1, 1.8, 2.8, 4, 5.5, 7.5, 10]) { // (larger writing needs a wider search)
       const r = gap * ring;
       for (const [ux, uy] of directions) {
         const box = { x: anchor[0] + (ux > 0 ? r : ux < 0 ? -r - w : -w / 2), y: anchor[1] + (uy > 0 ? r : uy < 0 ? -r - h : -h / 2), w, h };
@@ -347,5 +347,5 @@
     return best ? { x: best.x, y: best.y, ok: false } : { x: anchor[0] + gap, y: anchor[1] - h - gap, ok: false };
   }
 
-  return { LINK_LABEL_WIDTH, layoutDiagram, nodeSize, placeLabel, segmentHitsRect, polylineHitsRect, overlaps, inflate, inside, borderPoint, LABEL_SIZE, TITLE_SIZE, PAD, CLEAR, DEFAULTS };
+  return { LINK_LABEL_WIDTH, LINK_LABEL_SIZE, layoutDiagram, nodeSize, placeLabel, segmentHitsRect, polylineHitsRect, overlaps, inflate, inside, borderPoint, LABEL_SIZE, TITLE_SIZE, PAD, CLEAR, DEFAULTS };
 });

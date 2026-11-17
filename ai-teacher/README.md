@@ -56,3 +56,7 @@ This is a prototype for one person on their own laptop. For the public site:
 
 ## Pencil against voice (pacing)
 The board measures the pencil: real writing time against planned, and whether the voice reached the next idea before the pencil finished (console: `The voice had moved on to ...`, `Pencil so far: ...`). The planner gets a `Pacing:` note from those numbers. Long writing starts up to 0.8 s early. Setup > Teaching hints (on by default) sends the agent session-only context messages (style note at the start, board status after each turn); it never edits the agent and cannot slow or pause speech that is playing. Tests: core.test.js (pacing), browser.html section 8e, integration.mjs 6g (d2).
+
+## Handwriting style
+Plain text, labels, diagram text and graph labels use the printed single-stroke Hershey "futural" face (not cursive), slightly spaced and larger for legibility; equations use the same face for letters and digits. Sizes: text 39, title 52, small 32, diagram labels 32, graph ticks 26, axis names 32, point/curve labels 28. The stroke-by-stroke pencil animation is unchanged.
+

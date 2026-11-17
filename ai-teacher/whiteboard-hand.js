@@ -22,7 +22,8 @@
   const BASELINE = 22;        // font units: where letters sit
   const CAP = 21;             // font units: capital letter height
   const UNIT = 30;            // size / UNIT = scale from font units to board units
-  const SPACE = 14;           // font units: width of a space
+  const TRACK = 1.5;          // font units added after every letter of plain text: printed letters read better with air between them
+  const SPACE = 15;           // font units: width of a space
   const AXIS = 8;             // font units: height of the maths axis (where fraction bars and minus signs sit)
 
   /* ---------- Glyphs ---------- */
@@ -196,7 +197,8 @@
         if (accented) glyph = accented; else if (!unsupported.includes(ch + mark)) unsupported.push(ch + mark);
       }
       if (!glyph) { if (!unsupported.includes(ch)) unsupported.push(ch); continue; }
-      words[words.length - 1].push(glyphBox(glyph, s, ctx, found));
+      const box = glyphBox(glyph, s, ctx, found); box.w += TRACK * s;
+      words[words.length - 1].push(box);
     }
     const lines = [[]]; let lineWidth = 0;
     const spaceWidth = SPACE * s, wordWidth = (word) => word.reduce((sum, b) => sum + b.w, 0);
@@ -209,7 +211,7 @@
       lineWidth += (line.length ? spaceWidth : 0) + width;
       line.push(word);
     });
-    const lineHeight = 38 * s, strokes = []; let advanceWidth = 0;
+    const lineHeight = 42 * s, strokes = []; let advanceWidth = 0;
     lines.forEach((line, row) => {
       let x = 0;
       line.forEach((word, wi) => {

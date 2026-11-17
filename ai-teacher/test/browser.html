@@ -186,7 +186,7 @@ async function runSelfTest() {
     check("maths: ZERO overlap between elements, everything inside the page", problems.length === 0, problems.join(" | "));
     const c = ["c1", "c2", "c3"].map((id) => wb.items.get(id));
     check("maths: the lines of one calculation stay together on one page and are tightly stacked", c.every((i) => i.page === c[0].page) && c[1].bbox.y > c[0].bbox.y + c[0].bbox.h && c[1].bbox.y - (c[0].bbox.y + c[0].bbox.h) < 18 && c[2].bbox.y - (c[1].bbox.y + c[1].bbox.h) < 18, JSON.stringify(c.map((i) => i.bbox)));
-    const equalsX = c.map((i) => i.bbox.x + WhiteboardHand.typesetMath(i.text, { size: 34 }).relationX);
+    const equalsX = c.map((i) => i.bbox.x + WhiteboardHand.typesetMath(i.text, { size: 39 }).relationX);
     check("maths: the = signs of the calculation line up vertically (aligned equations)", Math.max(...equalsX) - Math.min(...equalsX) < 1.5, JSON.stringify(equalsX.map(Math.round)));
     const g = wb.items.get("g").bbox, eq = wb.items.get("eq").bbox;
     check("maths: the graph sits beside the equation when there is room (side by side)", g.x >= eq.x + eq.w && g.y < eq.y + eq.h + 200, JSON.stringify({ eq, g }));
